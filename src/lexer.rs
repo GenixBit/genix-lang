@@ -58,7 +58,11 @@ impl Token {
     }
 }
 
-pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
+pub fn lex(source: &str) -> Result<Vec<Token>, String> {
+    lex_diagnostic(source).map_err(|diagnostic| diagnostic.to_string())
+}
+
+pub fn lex_diagnostic(source: &str) -> Result<Vec<Token>, Diagnostic> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -323,7 +327,7 @@ mod tests {
 
     #[test]
     fn reports_structured_lex_errors() {
-        let error = lex("fn main() { @ }").unwrap_err();
+        let error = lex_diagnostic("fn main() { @ }").unwrap_err();
         assert_eq!(error.code, "E0001");
         assert_eq!(error.span.unwrap().line, 1);
     }
