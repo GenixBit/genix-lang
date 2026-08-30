@@ -1,0 +1,18 @@
+fn main() {
+    let company = "GenixBit";
+    mut count = 0;
+
+    while count < 5 {
+        count = count + 1;
+
+        if count == 3 {
+            print("Genix reached three");
+        } else {
+            print(count);
+        }
+    }
+
+    if count >= 5 && !false {
+        print(company + " control flow works!");
+    }
+}
