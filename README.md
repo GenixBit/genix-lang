@@ -6,40 +6,50 @@ Genix source files use the **`.gb`** extension.
 
 > Status: **pre-alpha / v0.0.1**. Syntax and APIs are not stable yet.
 
-## Try the current interpreter
+## Try Genix
 
 ```gb
 fn main() {
     let company = "GenixBit";
-    let answer = 2 + 3 * 4;
+    mut count = 0;
 
-    print("Hello from Genix!");
-    print(company);
-    print(answer);
+    while count < 5 {
+        count = count + 1;
+
+        if count == 3 {
+            print("Genix reached three");
+        } else {
+            print(count);
+        }
+    }
+
+    if count >= 5 && !false {
+        print(company + " control flow works!");
+    }
 }
 ```
 
 Run it with:
 
 ```bash
-cargo run -- run examples/basics.gb
+cargo run -- run examples/control_flow.gb
 ```
 
 Or, after installing/building the `gb` binary:
 
 ```bash
-gb run examples/basics.gb
+gb run examples/control_flow.gb
 ```
 
 Validate syntax without executing:
 
 ```bash
-gb check examples/basics.gb
+gb check examples/control_flow.gb
 ```
 
 ## What works today
 
-The first executable language pipeline is now implemented:
+The executable language pipeline is:
 
 ```text
 .gb source
@@ -61,13 +71,17 @@ Current language support includes:
 
 - `.gb` source files
 - `fn main()` entry point
-- `let` variables
-- Integers
-- Floating-point numbers
-- Strings
-- Booleans (`true` / `false`)
+- Immutable variables with `let`
+- Mutable variables with `mut`
+- Variable assignment
+- Integers, floats, strings, and booleans
 - Variable references
-- `+`, `-`, `*`, `/`
+- Arithmetic: `+`, `-`, `*`, `/`
+- Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- Boolean logic: `&&`, `||`, `!`
+- `if` / `else`
+- `while`
+- Lexical block scope
 - Parenthesized expressions
 - Unary negative values
 - String concatenation with `+`
@@ -78,43 +92,53 @@ Current language support includes:
 - `gb check`
 - `gb version`
 
-## Example
+## Mutability
+
+Genix variables are immutable by default:
 
 ```gb
-fn main() {
-    let language = "Genix";
-    let version = 0.1;
-    let ready = true;
-    let result = 10 + 5 * 2;
+let language = "Genix";
+```
 
-    print("Language: " + language);
-    print(version);
-    print(ready);
+Use `mut` only when a variable needs to change:
+
+```gb
+mut count = 0;
+count = count + 1;
+```
+
+Assigning to a `let` variable produces a runtime error in the current interpreter. Static detection is planned as part of the type-checking milestone.
+
+## Next language milestone — Functions and types
+
+The next major compiler milestone is user-defined functions and static typing:
+
+```gb
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn main() {
+    let result: int = add(10, 20);
     print(result);
 }
 ```
 
-## Next language milestones
-
-Development will proceed incrementally rather than adding large frameworks before the core language is stable.
-
-### Milestone 2 — Control flow
-
-- Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
-- Logical operators (`&&`, `||`, `!`)
-- `if` / `else`
-- `while`
-- Blocks and lexical scope
-
-### Milestone 3 — Functions and types
+Planned work:
 
 - User-defined functions
-- Parameters and return values
+- Parameters
+- Return values
+- `return`
 - Explicit types (`int`, `float`, `string`, `bool`)
+- Function-call expressions
 - Static type checking
-- Better compiler diagnostics
+- Compile-time mutability checks
+- Improved diagnostics
 
-### Milestone 4 — Modules and tooling
+## Later milestones
+
+### Modules and tooling
 
 - Imports/modules
 - Project manifests
@@ -123,7 +147,7 @@ Development will proceed incrementally rather than adding large frameworks befor
 - `gb fmt`
 - Package foundations
 
-### Later
+### Native platform
 
 - Native code generation
 - Memory-safety model
@@ -167,7 +191,7 @@ src/
 
 ## Development
 
-The initial implementation is written in **Rust**. The current execution engine is an interpreter, allowing the syntax and semantics to mature before introducing native code generation.
+The initial implementation is written in **Rust**. The current execution engine is an interpreter, allowing syntax and semantics to mature before native code generation is introduced.
 
 Run checks locally with:
 
@@ -175,9 +199,10 @@ Run checks locally with:
 cargo check
 cargo test
 cargo run -- run examples/hello.gb
+cargo run -- run examples/control_flow.gb
 ```
 
-GitHub Actions also runs the core compiler tests on pushes and pull requests.
+GitHub Actions runs compiler checks, tests, and executable Genix examples on pushes and pull requests.
 
 ## Project status
 
