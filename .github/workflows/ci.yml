@@ -34,3 +34,18 @@ jobs:
 
       - name: Run typed-functions example
         run: cargo run -- run examples/functions.gb
+
+      - name: Check multi-file project
+        run: cargo run -- check examples/project
+
+      - name: Run multi-file project
+        run: cargo run -- run examples/project
+
+      - name: Build frontend project artifact
+        run: cargo run -- build examples/project
+
+      - name: Smoke test project creation
+        run: |
+          cargo run -- new /tmp/genix-ci-app
+          cargo run -- check /tmp/genix-ci-app
+          cargo run -- run /tmp/genix-ci-app

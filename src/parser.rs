@@ -17,11 +17,9 @@ impl Parser {
             functions.push(self.parse_function()?);
         }
         self.expect_simple(TokenKind::Eof, "unexpected tokens after program")?;
-
         if functions.is_empty() {
             return Err("Genix program must define at least fn main()".into());
         }
-
         Ok(Program { functions })
     }
 
@@ -35,12 +33,7 @@ impl Parser {
             loop {
                 let param_name = self.expect_identifier("expected parameter name")?;
                 self.expect_simple(TokenKind::Colon, "expected ':' after parameter name")?;
-                let ty = self.parse_type()?;
-                params.push(Param {
-                    name: param_name,
-                    ty,
-                });
-
+                params.push(Param { name: param_name, ty: self.parse_type()? });
                 if !self.matches(&TokenKind::Comma) {
                     break;
                 }
@@ -57,13 +50,7 @@ impl Parser {
             Type::Void
         };
         let body = self.parse_block()?;
-
-        Ok(Function {
-            name,
-            params,
-            return_type,
-            body,
-        })
+        Ok(Function { name, params, return_type, body })
     }
 
     fn parse_type(&mut self) -> Result<Type, String> {
@@ -119,7 +106,6 @@ impl Parser {
                 self.consume_optional_semicolon();
                 return Ok(Stmt::Assign { name, value });
             }
-
             if name == "print" {
                 self.advance();
                 self.expect_simple(TokenKind::LParen, "expected '(' after print")?;
@@ -141,20 +127,11 @@ impl Parser {
 
     fn parse_binding(&mut self, mutable: bool) -> Result<Stmt, String> {
         let name = self.expect_identifier("expected variable name")?;
-        let annotation = if self.matches(&TokenKind::Colon) {
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
+        let annotation = if self.matches(&TokenKind::Colon) { Some(self.parse_type()?) } else { None };
         self.expect_simple(TokenKind::Equal, "expected '=' after variable name")?;
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
-        Ok(Stmt::Let {
-            name,
-            value,
-            mutable,
-            annotation,
-        })
+        Ok(Stmt::Let { name, value, mutable, annotation })
     }
 
     fn parse_return(&mut self) -> Result<Stmt, String> {
@@ -165,7 +142,6 @@ impl Parser {
         if self.check(&TokenKind::RBrace) {
             return Ok(Stmt::Return(None));
         }
-
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
         Ok(Stmt::Return(Some(value)))
@@ -174,16 +150,8 @@ impl Parser {
     fn parse_if(&mut self) -> Result<Stmt, String> {
         let condition = self.parse_expression()?;
         let then_branch = self.parse_block()?;
-        let else_branch = if self.matches(&TokenKind::Else) {
-            Some(self.parse_block()?)
-        } else {
-            None
-        };
-        Ok(Stmt::If {
-            condition,
-            then_branch,
-            else_branch,
-        })
+        let else_branch = if self.matches(&TokenKind::Else) { Some(self.parse_block()?) } else { None };
+        Ok(Stmt::If { condition, then_branch, else_branch })
     }
 
     fn parse_while(&mut self) -> Result<Stmt, String> {
@@ -192,19 +160,13 @@ impl Parser {
         Ok(Stmt::While { condition, body })
     }
 
-    fn parse_expression(&mut self) -> Result<Expr, String> {
-        self.parse_or()
-    }
+    fn parse_expression(&mut self) -> Result<Expr, String> { self.parse_or() }
 
     fn parse_or(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_and()?;
         while self.matches(&TokenKind::OrOr) {
             let right = self.parse_and()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::Or,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::Or, right: Box::new(right) };
         }
         Ok(expr)
     }
@@ -213,11 +175,7 @@ impl Parser {
         let mut expr = self.parse_equality()?;
         while self.matches(&TokenKind::AndAnd) {
             let right = self.parse_equality()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op: BinaryOp::And,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::And, right: Box::new(right) };
         }
         Ok(expr)
     }
@@ -229,16 +187,10 @@ impl Parser {
                 Some(BinaryOp::Equal)
             } else if self.matches(&TokenKind::BangEqual) {
                 Some(BinaryOp::NotEqual)
-            } else {
-                None
-            };
+            } else { None };
             let Some(op) = op else { break };
             let right = self.parse_comparison()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
         }
         Ok(expr)
     }
@@ -254,16 +206,10 @@ impl Parser {
                 Some(BinaryOp::Greater)
             } else if self.matches(&TokenKind::GreaterEqual) {
                 Some(BinaryOp::GreaterEqual)
-            } else {
-                None
-            };
+            } else { None };
             let Some(op) = op else { break };
             let right = self.parse_addition()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
         }
         Ok(expr)
     }
@@ -275,16 +221,10 @@ impl Parser {
                 Some(BinaryOp::Add)
             } else if self.matches(&TokenKind::Minus) {
                 Some(BinaryOp::Subtract)
-            } else {
-                None
-            };
+            } else { None };
             let Some(op) = op else { break };
             let right = self.parse_multiplication()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
         }
         Ok(expr)
     }
@@ -296,57 +236,40 @@ impl Parser {
                 Some(BinaryOp::Multiply)
             } else if self.matches(&TokenKind::Slash) {
                 Some(BinaryOp::Divide)
-            } else {
-                None
-            };
+            } else { None };
             let Some(op) = op else { break };
             let right = self.parse_unary()?;
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                op,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
         }
         Ok(expr)
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
         if self.matches(&TokenKind::Minus) {
-            return Ok(Expr::Unary {
-                op: UnaryOp::Negate,
-                expr: Box::new(self.parse_unary()?),
-            });
+            return Ok(Expr::Unary { op: UnaryOp::Negate, expr: Box::new(self.parse_unary()?) });
         }
         if self.matches(&TokenKind::Bang) {
-            return Ok(Expr::Unary {
-                op: UnaryOp::Not,
-                expr: Box::new(self.parse_unary()?),
-            });
+            return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(self.parse_unary()?) });
         }
         self.parse_call()
     }
 
     fn parse_call(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
-
         while self.matches(&TokenKind::LParen) {
             let mut arguments = Vec::new();
             if !self.check(&TokenKind::RParen) {
                 loop {
                     arguments.push(self.parse_expression()?);
-                    if !self.matches(&TokenKind::Comma) {
-                        break;
-                    }
+                    if !self.matches(&TokenKind::Comma) { break; }
                 }
             }
             self.expect_simple(TokenKind::RParen, "expected ')' after function arguments")?;
-
             expr = match expr {
                 Expr::Variable(callee) => Expr::Call { callee, arguments },
                 _ => return Err(self.error_here("only named functions can be called in Genix v0.1")),
             };
         }
-
         Ok(expr)
     }
 
@@ -358,7 +281,15 @@ impl Parser {
             TokenKind::String(value) => Ok(Expr::String(value)),
             TokenKind::True => Ok(Expr::Bool(true)),
             TokenKind::False => Ok(Expr::Bool(false)),
-            TokenKind::Identifier(name) => Ok(Expr::Variable(name)),
+            TokenKind::Identifier(name) => {
+                let mut qualified = name;
+                while self.matches(&TokenKind::Dot) {
+                    let segment = self.expect_identifier("expected identifier after '.'")?;
+                    qualified.push('.');
+                    qualified.push_str(&segment);
+                }
+                Ok(Expr::Variable(qualified))
+            }
             TokenKind::LParen => {
                 let expr = self.parse_expression()?;
                 self.expect_simple(TokenKind::RParen, "expected ')' after expression")?;
@@ -369,9 +300,7 @@ impl Parser {
     }
 
     fn consume_optional_semicolon(&mut self) {
-        if self.check(&TokenKind::Semicolon) {
-            self.advance();
-        }
+        if self.check(&TokenKind::Semicolon) { self.advance(); }
     }
 
     fn expect_identifier(&mut self, message: &str) -> Result<String, String> {
@@ -395,9 +324,7 @@ impl Parser {
         if self.check(expected) {
             self.advance();
             true
-        } else {
-            false
-        }
+        } else { false }
     }
 
     fn check(&self, expected: &TokenKind) -> bool {
@@ -405,8 +332,7 @@ impl Parser {
     }
 
     fn check_next(&self, expected: &TokenKind) -> bool {
-        self.tokens
-            .get(self.current + 1)
+        self.tokens.get(self.current + 1)
             .map(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(expected))
             .unwrap_or(false)
     }
@@ -415,14 +341,10 @@ impl Parser {
         if self.current < self.tokens.len() - 1 {
             self.current += 1;
             &self.tokens[self.current - 1]
-        } else {
-            &self.tokens[self.current]
-        }
+        } else { &self.tokens[self.current] }
     }
 
-    fn peek(&self) -> &Token {
-        &self.tokens[self.current]
-    }
+    fn peek(&self) -> &Token { &self.tokens[self.current] }
 
     fn error_here(&self, message: &str) -> String {
         let token = self.peek();
@@ -446,9 +368,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_control_flow_inside_function() {
-        let source = "fn main() { mut x: int = 0; while x < 3 { x = x + 1; } if x == 3 { print(true); } else { print(false); } }";
+    fn parses_namespaced_call() {
+        let source = "fn main() { let result: int = math.add(2, 3); print(result); }";
         let program = parse(lex(source).unwrap()).unwrap();
-        assert_eq!(program.functions[0].body.len(), 3);
+        match &program.functions[0].body[0] {
+            Stmt::Let { value: Expr::Call { callee, .. }, .. } => assert_eq!(callee, "math.add"),
+            _ => panic!("expected namespaced call"),
+        }
     }
 }

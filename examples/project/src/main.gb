@@ -1,0 +1,8 @@
+import math;
+import greeting;
+
+fn main() {
+    let answer: int = math.twice(21);
+    greeting.hello("Genix");
+    print(answer);
+}

@@ -1,0 +1,3 @@
+fn hello(name: string) {
+    print("Hello " + name + " from a Genix module");
+}
