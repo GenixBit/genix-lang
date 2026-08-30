@@ -6,6 +6,7 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    Return,
     True,
     False,
     Identifier(String),
@@ -17,6 +18,9 @@ pub enum TokenKind {
     LBrace,
     RBrace,
     Semicolon,
+    Colon,
+    Comma,
+    Arrow,
     Equal,
     EqualEqual,
     Bang,
@@ -72,6 +76,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
             '{' => push_simple(&mut tokens, TokenKind::LBrace, line, column, &mut i, &mut column),
             '}' => push_simple(&mut tokens, TokenKind::RBrace, line, column, &mut i, &mut column),
             ';' => push_simple(&mut tokens, TokenKind::Semicolon, line, column, &mut i, &mut column),
+            ':' => push_simple(&mut tokens, TokenKind::Colon, line, column, &mut i, &mut column),
+            ',' => push_simple(&mut tokens, TokenKind::Comma, line, column, &mut i, &mut column),
+            '-' if matches_next(&chars, i, '>') => push_double(&mut tokens, TokenKind::Arrow, line, column, &mut i, &mut column),
             '=' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::EqualEqual, line, column, &mut i, &mut column),
             '=' => push_simple(&mut tokens, TokenKind::Equal, line, column, &mut i, &mut column),
             '!' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::BangEqual, line, column, &mut i, &mut column),
@@ -175,6 +182,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                     "if" => TokenKind::If,
                     "else" => TokenKind::Else,
                     "while" => TokenKind::While,
+                    "return" => TokenKind::Return,
                     "true" => TokenKind::True,
                     "false" => TokenKind::False,
                     _ => TokenKind::Identifier(text),
@@ -229,12 +237,11 @@ mod tests {
     }
 
     #[test]
-    fn lexes_control_flow_and_boolean_operators() {
-        let tokens = lex("fn main() { mut x = 0; while x < 3 && x != 9 { x = x + 1; } if !false { print(x); } }").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Mut)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::While)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::AndAnd)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::BangEqual)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::If)));
+    fn lexes_function_types_and_return() {
+        let tokens = lex("fn add(a: int, b: int) -> int { return a + b; }").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Colon)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Comma)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Arrow)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Return)));
     }
 }

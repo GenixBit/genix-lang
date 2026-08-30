@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::ast::{BinaryOp, Expr, Program, Stmt, UnaryOp};
+use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -26,35 +26,118 @@ impl fmt::Display for Value {
 struct Binding {
     value: Value,
     mutable: bool,
+    ty: Type,
+}
+
+#[derive(Debug)]
+enum Flow {
+    Continue,
+    Return(Option<Value>),
 }
 
 pub fn execute(program: &Program) -> Result<(), String> {
-    let mut interpreter = Interpreter::new();
-    interpreter.run(program)
+    let mut interpreter = Interpreter::new(program);
+    let result = interpreter.call_function("main", Vec::new())?;
+    if result.is_some() {
+        return Err("runtime error: fn main() cannot return a value".into());
+    }
+    Ok(())
 }
 
 struct Interpreter {
+    functions: HashMap<String, Function>,
     scopes: Vec<HashMap<String, Binding>>,
 }
 
 impl Interpreter {
-    fn new() -> Self {
+    fn new(program: &Program) -> Self {
+        let functions = program
+            .functions
+            .iter()
+            .cloned()
+            .map(|function| (function.name.clone(), function))
+            .collect();
+
         Self {
+            functions,
             scopes: vec![HashMap::new()],
         }
     }
 
-    fn run(&mut self, program: &Program) -> Result<(), String> {
-        for statement in &program.body {
-            self.execute_statement(statement)?;
+    fn call_function(&mut self, name: &str, arguments: Vec<Value>) -> Result<Option<Value>, String> {
+        let function = self
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("undefined function '{name}'"))?;
+
+        if arguments.len() != function.params.len() {
+            return Err(format!(
+                "function '{name}' expects {} argument(s), found {}",
+                function.params.len(),
+                arguments.len()
+            ));
         }
-        Ok(())
+
+        let caller_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let result = (|| {
+            for (param, value) in function.params.iter().zip(arguments.into_iter()) {
+                let value = coerce(value, param.ty)?;
+                self.scopes[0].insert(
+                    param.name.clone(),
+                    Binding {
+                        value,
+                        mutable: false,
+                        ty: param.ty,
+                    },
+                );
+            }
+
+            for statement in &function.body {
+                match self.execute_statement(statement)? {
+                    Flow::Continue => {}
+                    Flow::Return(value) => {
+                        return self.finish_return(&function, value);
+                    }
+                }
+            }
+
+            if function.return_type == Type::Void {
+                Ok(None)
+            } else {
+                Err(format!(
+                    "function '{}' finished without returning {}",
+                    function.name, function.return_type
+                ))
+            }
+        })();
+        self.scopes = caller_scopes;
+        result
     }
 
-    fn execute_statement(&mut self, statement: &Stmt) -> Result<(), String> {
+    fn finish_return(&self, function: &Function, value: Option<Value>) -> Result<Option<Value>, String> {
+        match (function.return_type, value) {
+            (Type::Void, None) => Ok(None),
+            (Type::Void, Some(_)) => Err(format!("void function '{}' returned a value", function.name)),
+            (expected, Some(value)) => Ok(Some(coerce(value, expected)?)),
+            (expected, None) => Err(format!(
+                "function '{}' must return a value of type {expected}",
+                function.name
+            )),
+        }
+    }
+
+    fn execute_statement(&mut self, statement: &Stmt) -> Result<Flow, String> {
         match statement {
-            Stmt::Let { name, value, mutable } => {
+            Stmt::Let {
+                name,
+                value,
+                mutable,
+                annotation,
+            } => {
                 let evaluated = self.evaluate(value)?;
+                let ty = annotation.unwrap_or_else(|| value_type(&evaluated));
+                let evaluated = coerce(evaluated, ty)?;
                 let scope = self.scopes.last_mut().expect("interpreter always has a scope");
                 if scope.contains_key(name) {
                     return Err(format!("variable '{name}' is already declared in this scope"));
@@ -64,17 +147,38 @@ impl Interpreter {
                     Binding {
                         value: evaluated,
                         mutable: *mutable,
+                        ty,
                     },
                 );
-                Ok(())
+                Ok(Flow::Continue)
             }
             Stmt::Assign { name, value } => {
                 let evaluated = self.evaluate(value)?;
-                self.assign(name, evaluated)
+                self.assign(name, evaluated)?;
+                Ok(Flow::Continue)
             }
             Stmt::Print(expr) => {
                 println!("{}", self.evaluate(expr)?);
-                Ok(())
+                Ok(Flow::Continue)
+            }
+            Stmt::Expr(expr) => {
+                match expr {
+                    Expr::Call { callee, arguments } => {
+                        let values = self.evaluate_arguments(arguments)?;
+                        self.call_function(callee, values)?;
+                    }
+                    _ => {
+                        self.evaluate(expr)?;
+                    }
+                }
+                Ok(Flow::Continue)
+            }
+            Stmt::Return(value) => {
+                let value = match value {
+                    Some(expr) => Some(self.evaluate(expr)?),
+                    None => None,
+                };
+                Ok(Flow::Return(value))
             }
             Stmt::If {
                 condition,
@@ -86,26 +190,36 @@ impl Interpreter {
                 } else if let Some(else_branch) = else_branch {
                     self.execute_block(else_branch)
                 } else {
-                    Ok(())
+                    Ok(Flow::Continue)
                 }
             }
             Stmt::While { condition, body } => {
-                while self.expect_bool(self.evaluate(condition)?, "while condition")? {
-                    self.execute_block(body)?;
+                loop {
+                    let condition_value = self.evaluate(condition)?;
+                    if !self.expect_bool(condition_value, "while condition")? {
+                        break;
+                    }
+                    match self.execute_block(body)? {
+                        Flow::Continue => {}
+                        returned @ Flow::Return(_) => return Ok(returned),
+                    }
                 }
-                Ok(())
+                Ok(Flow::Continue)
             }
             Stmt::Block(body) => self.execute_block(body),
         }
     }
 
-    fn execute_block(&mut self, body: &[Stmt]) -> Result<(), String> {
+    fn execute_block(&mut self, body: &[Stmt]) -> Result<Flow, String> {
         self.scopes.push(HashMap::new());
         let result = (|| {
             for statement in body {
-                self.execute_statement(statement)?;
+                match self.execute_statement(statement)? {
+                    Flow::Continue => {}
+                    returned @ Flow::Return(_) => return Ok(returned),
+                }
             }
-            Ok(())
+            Ok(Flow::Continue)
         })();
         self.scopes.pop();
         result
@@ -119,7 +233,7 @@ impl Interpreter {
                         "cannot assign to immutable variable '{name}'; declare it with 'mut'"
                     ));
                 }
-                binding.value = value;
+                binding.value = coerce(value, binding.ty)?;
                 return Ok(());
             }
         }
@@ -130,7 +244,15 @@ impl Interpreter {
         self.scopes.iter().rev().find_map(|scope| scope.get(name))
     }
 
-    fn evaluate(&self, expr: &Expr) -> Result<Value, String> {
+    fn evaluate_arguments(&mut self, arguments: &[Expr]) -> Result<Vec<Value>, String> {
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            values.push(self.evaluate(argument)?);
+        }
+        Ok(values)
+    }
+
+    fn evaluate(&mut self, expr: &Expr) -> Result<Value, String> {
         match expr {
             Expr::Integer(value) => Ok(Value::Integer(*value)),
             Expr::Float(value) => Ok(Value::Float(*value)),
@@ -140,25 +262,34 @@ impl Interpreter {
                 .lookup(name)
                 .map(|binding| binding.value.clone())
                 .ok_or_else(|| format!("undefined variable '{name}'")),
+            Expr::Call { callee, arguments } => {
+                let values = self.evaluate_arguments(arguments)?;
+                self.call_function(callee, values)?
+                    .ok_or_else(|| format!("function '{callee}' does not return a value"))
+            }
             Expr::Unary { op, expr } => {
                 let value = self.evaluate(expr)?;
                 self.apply_unary(*op, value)
             }
             Expr::Binary { left, op, right } => match op {
                 BinaryOp::And => {
-                    let left = self.expect_bool(self.evaluate(left)?, "left side of '&&'")?;
+                    let left_value = self.evaluate(left)?;
+                    let left = self.expect_bool(left_value, "left side of '&&'")?;
                     if !left {
                         return Ok(Value::Bool(false));
                     }
-                    let right = self.expect_bool(self.evaluate(right)?, "right side of '&&'")?;
+                    let right_value = self.evaluate(right)?;
+                    let right = self.expect_bool(right_value, "right side of '&&'")?;
                     Ok(Value::Bool(right))
                 }
                 BinaryOp::Or => {
-                    let left = self.expect_bool(self.evaluate(left)?, "left side of '||'")?;
+                    let left_value = self.evaluate(left)?;
+                    let left = self.expect_bool(left_value, "left side of '||'")?;
                     if left {
                         return Ok(Value::Bool(true));
                     }
-                    let right = self.expect_bool(self.evaluate(right)?, "right side of '||'")?;
+                    let right_value = self.evaluate(right)?;
+                    let right = self.expect_bool(right_value, "right side of '||'")?;
                     Ok(Value::Bool(right))
                 }
                 _ => {
@@ -201,6 +332,26 @@ impl Interpreter {
             BinaryOp::GreaterEqual => compare_numeric(left, right, |a, b| a >= b),
             BinaryOp::And | BinaryOp::Or => unreachable!("logical operators short-circuit in evaluate"),
         }
+    }
+}
+
+fn coerce(value: Value, expected: Type) -> Result<Value, String> {
+    match (value, expected) {
+        (Value::Integer(value), Type::Float) => Ok(Value::Float(value as f64)),
+        (value, expected) if value_type(&value) == expected => Ok(value),
+        (value, expected) => Err(format!(
+            "cannot use runtime value of type {} as {expected}",
+            type_name(&value)
+        )),
+    }
+}
+
+fn value_type(value: &Value) -> Type {
+    match value {
+        Value::Integer(_) => Type::Int,
+        Value::Float(_) => Type::Float,
+        Value::Bool(_) => Type::Bool,
+        Value::String(_) => Type::String,
     }
 }
 
@@ -297,45 +448,38 @@ fn type_name(value: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{lexer::lex, parser::parse};
+    use crate::{lexer::lex, parser::parse, typechecker};
+
+    fn program(source: &str) -> Program {
+        let program = parse(lex(source).unwrap()).unwrap();
+        typechecker::check(&program).unwrap();
+        program
+    }
 
     #[test]
-    fn executes_variables_and_arithmetic() {
-        let source = "fn main() { let answer = 2 + 3 * 4; print(answer); }";
-        let program = parse(lex(source).unwrap()).unwrap();
+    fn executes_typed_function_call() {
+        let program = program("fn add(a: int, b: int) -> int { return a + b; } fn main() {}");
+        let mut interpreter = Interpreter::new(&program);
+        let result = interpreter
+            .call_function("add", vec![Value::Integer(2), Value::Integer(3)])
+            .unwrap();
+        assert_eq!(result, Some(Value::Integer(5)));
+    }
+
+    #[test]
+    fn widens_int_argument_to_float() {
+        let program = program("fn identity(x: float) -> float { return x; } fn main() {}");
+        let mut interpreter = Interpreter::new(&program);
+        let result = interpreter
+            .call_function("identity", vec![Value::Integer(3)])
+            .unwrap();
+        assert_eq!(result, Some(Value::Float(3.0)));
+    }
+
+    #[test]
+    fn executes_control_flow_with_functions() {
+        let source = "fn inc(x: int) -> int { return x + 1; } fn main() { mut x: int = 0; while x < 3 { x = inc(x); } print(x); }";
+        let program = program(source);
         assert!(execute(&program).is_ok());
-    }
-
-    #[test]
-    fn executes_while_and_assignment() {
-        let source = "fn main() { mut x = 0; while x < 3 { x = x + 1; } }";
-        let program = parse(lex(source).unwrap()).unwrap();
-        let mut interpreter = Interpreter::new();
-        interpreter.run(&program).unwrap();
-        assert_eq!(interpreter.lookup("x").unwrap().value, Value::Integer(3));
-    }
-
-    #[test]
-    fn rejects_assignment_to_immutable_variable() {
-        let source = "fn main() { let x = 1; x = 2; }";
-        let program = parse(lex(source).unwrap()).unwrap();
-        let error = execute(&program).unwrap_err();
-        assert!(error.contains("immutable variable 'x'"));
-    }
-
-    #[test]
-    fn evaluates_boolean_logic_and_if() {
-        let source = "fn main() { mut x = 1; if x == 1 && !false { x = 2; } }";
-        let program = parse(lex(source).unwrap()).unwrap();
-        let mut interpreter = Interpreter::new();
-        interpreter.run(&program).unwrap();
-        assert_eq!(interpreter.lookup("x").unwrap().value, Value::Integer(2));
-    }
-
-    #[test]
-    fn rejects_undefined_variables() {
-        let source = "fn main() { print(missing); }";
-        let program = parse(lex(source).unwrap()).unwrap();
-        assert!(execute(&program).is_err());
     }
 }

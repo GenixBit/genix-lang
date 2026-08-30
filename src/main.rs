@@ -2,6 +2,7 @@ mod ast;
 mod interpreter;
 mod lexer;
 mod parser;
+mod typechecker;
 
 use std::{env, fs, process};
 
@@ -54,7 +55,7 @@ fn main() {
             };
 
             match check_source(&source) {
-                Ok(()) => println!("✓ {path} is valid Genix syntax"),
+                Ok(()) => println!("✓ {path} passed Genix syntax and type checks"),
                 Err(error) => {
                     eprintln!("Genix error: {error}");
                     process::exit(1);
@@ -73,15 +74,20 @@ fn main() {
     }
 }
 
-fn check_source(source: &str) -> Result<(), String> {
+fn compile_frontend(source: &str) -> Result<ast::Program, String> {
     let tokens = lexer::lex(source)?;
-    parser::parse(tokens)?;
+    let program = parser::parse(tokens)?;
+    typechecker::check(&program)?;
+    Ok(program)
+}
+
+fn check_source(source: &str) -> Result<(), String> {
+    compile_frontend(source)?;
     Ok(())
 }
 
 fn run_source(source: &str) -> Result<(), String> {
-    let tokens = lexer::lex(source)?;
-    let program = parser::parse(tokens)?;
+    let program = compile_frontend(source)?;
     interpreter::execute(&program)
 }
 
@@ -89,8 +95,8 @@ fn print_help() {
     println!("Genix developer CLI");
     println!();
     println!("Usage:");
-    println!("  gb run <file.gb>     Execute a Genix source file");
-    println!("  gb check <file.gb>   Validate Genix syntax");
+    println!("  gb run <file.gb>     Type-check and execute a Genix source file");
+    println!("  gb check <file.gb>   Validate Genix syntax and types");
     println!("  gb version           Show the current version");
     println!("  gb help              Show this help");
 }
