@@ -41,11 +41,22 @@ jobs:
       - name: Run multi-file project
         run: cargo run -- run examples/project
 
-      - name: Build frontend project artifact
+      - name: Build native debug executable
         run: cargo run -- build examples/project
+
+      - name: Execute native debug binary
+        run: ./examples/project/build/module-demo
+
+      - name: Build native release executable
+        run: cargo run -- build examples/project --release
+
+      - name: Execute native release binary
+        run: ./examples/project/build/module-demo
 
       - name: Smoke test project creation
         run: |
           cargo run -- new /tmp/genix-ci-app
           cargo run -- check /tmp/genix-ci-app
           cargo run -- run /tmp/genix-ci-app
+          cargo run -- build /tmp/genix-ci-app
+          /tmp/genix-ci-app/build/genix-ci-app

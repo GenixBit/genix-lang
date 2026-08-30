@@ -1,4 +1,5 @@
 mod ast;
+mod codegen;
 mod interpreter;
 mod lexer;
 mod parser;
@@ -22,7 +23,7 @@ fn main() {
         }
         Some("run") => run_target(args.next().as_deref()),
         Some("check") => check_target(args.next().as_deref()),
-        Some("build") => build_target(args.next().as_deref()),
+        Some("build") => build_target(args.collect()),
         Some("version") | Some("--version") | Some("-V") => {
             println!("Genix 0.0.1 (pre-alpha)");
             Ok(())
@@ -84,17 +85,43 @@ fn check_target(target: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn build_target(target: Option<&str>) -> Result<(), String> {
-    let root = target.unwrap_or(".");
+fn build_target(args: Vec<String>) -> Result<(), String> {
+    let mut target: Option<String> = None;
+    let mut release = false;
+
+    for arg in args {
+        if arg == "--release" {
+            release = true;
+        } else if arg.starts_with('-') {
+            return Err(format!("unknown build option '{arg}'"));
+        } else if target.is_none() {
+            target = Some(arg);
+        } else {
+            return Err("gb build accepts at most one project path".into());
+        }
+    }
+
+    let root = target.as_deref().unwrap_or(".");
     if is_gb_file(root) {
-        return Err("gb build currently operates on Genix projects with genix.toml".into());
+        return Err("gb build operates on Genix projects with genix.toml".into());
     }
 
     let loaded = project::load_project(Path::new(root))?;
-    let artifact = project::write_frontend_artifact(&loaded)?;
-    println!("✓ frontend build completed for '{}'", loaded.config.name);
-    println!("  {}", artifact.display());
-    println!("  native executable generation is the next backend milestone");
+    let artifact = codegen::build_native(
+        &loaded.program,
+        &loaded.root,
+        &loaded.config.name,
+        release,
+    )?;
+
+    let profile = if artifact.release { "release" } else { "debug" };
+    println!(
+        "✓ native {profile} build completed for '{}'",
+        loaded.config.name
+    );
+    println!("  compiler: {}", artifact.compiler);
+    println!("  C source: {}", artifact.source.display());
+    println!("  executable: {}", artifact.executable.display());
     Ok(())
 }
 
@@ -130,12 +157,15 @@ fn print_help() {
     println!("Genix developer CLI");
     println!();
     println!("Usage:");
-    println!("  gb new <name>        Create a new Genix project");
-    println!("  gb run [target]      Run a .gb file or project (default: current project)");
-    println!("  gb check [target]    Check a .gb file or project");
-    println!("  gb build [project]   Produce a checked frontend build artifact");
-    println!("  gb version           Show the current version");
-    println!("  gb help              Show this help");
+    println!("  gb new <name>                  Create a new Genix project");
+    println!("  gb run [target]                Run a .gb file or project");
+    println!("  gb check [target]              Check a .gb file or project");
+    println!("  gb build [project] [--release] Build a native executable");
+    println!("  gb version                     Show the current version");
+    println!("  gb help                        Show this help");
+    println!();
+    println!("Native build requirements:");
+    println!("  cc, clang, or gcc on PATH (or set CC)");
     println!();
     println!("Project layout:");
     println!("  genix.toml");
