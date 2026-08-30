@@ -4,60 +4,148 @@
 
 Genix source files use the **`.gb`** extension.
 
-> Status: early development / pre-alpha. The syntax and APIs are not yet stable.
+> Status: **pre-alpha / v0.0.1**. Syntax and APIs are not stable yet.
 
-## Vision
-
-Genix aims to combine a clean developer experience with strong typing, memory safety, modern concurrency, native performance, and first-class support for AI workloads.
+## Try the current interpreter
 
 ```gb
 fn main() {
-    print("Hello from Genix!")
+    let company = "GenixBit";
+    let answer = 2 + 3 * 4;
+
+    print("Hello from Genix!");
+    print(company);
+    print(answer);
 }
 ```
 
-Planned CLI experience:
+Run it with:
 
 ```bash
-gb run hello.gb
-gb build
-gb test
-gb fmt
-gb check
+cargo run -- run examples/basics.gb
 ```
 
-## Repository scope
+Or, after installing/building the `gb` binary:
 
-This repository is the flagship implementation of the Genix language and will contain:
+```bash
+gb run examples/basics.gb
+```
 
-- Lexer and tokenizer
-- Parser and abstract syntax tree (AST)
-- Semantic analysis
-- Type system
-- Intermediate representations
-- Diagnostics
-- Compiler frontend and code generation
-- `gb` developer CLI during the early implementation phase
-- Compiler tests and language conformance tests
+Validate syntax without executing:
 
-## Initial language goals
+```bash
+gb check examples/basics.gb
+```
 
-The first developer milestone focuses on a deliberately small core:
+## What works today
+
+The first executable language pipeline is now implemented:
+
+```text
+.gb source
+    ↓
+Lexer
+    ↓
+Tokens
+    ↓
+Parser
+    ↓
+AST
+    ↓
+Interpreter
+    ↓
+Program output
+```
+
+Current language support includes:
 
 - `.gb` source files
 - `fn main()` entry point
-- Variables and constants
-- Strings, integers, floats, and booleans
-- Arithmetic and comparison operators
-- `if` / `else`
-- Loops
-- Functions
-- Static type checking
-- Imports/modules
-- `print()`
-- Useful compiler diagnostics
+- `let` variables
+- Integers
+- Floating-point numbers
+- Strings
+- Booleans (`true` / `false`)
+- Variable references
+- `+`, `-`, `*`, `/`
+- Parenthesized expressions
+- Unary negative values
+- String concatenation with `+`
+- `print(...)`
+- `//` line comments
+- Basic lexer/parser/runtime diagnostics
+- `gb run`
+- `gb check`
+- `gb version`
 
-Advanced features such as AI primitives, async/concurrency, packages, web frameworks, and native code generation will be introduced incrementally after the core is stable.
+## Example
+
+```gb
+fn main() {
+    let language = "Genix";
+    let version = 0.1;
+    let ready = true;
+    let result = 10 + 5 * 2;
+
+    print("Language: " + language);
+    print(version);
+    print(ready);
+    print(result);
+}
+```
+
+## Next language milestones
+
+Development will proceed incrementally rather than adding large frameworks before the core language is stable.
+
+### Milestone 2 — Control flow
+
+- Comparison operators (`==`, `!=`, `<`, `<=`, `>`, `>=`)
+- Logical operators (`&&`, `||`, `!`)
+- `if` / `else`
+- `while`
+- Blocks and lexical scope
+
+### Milestone 3 — Functions and types
+
+- User-defined functions
+- Parameters and return values
+- Explicit types (`int`, `float`, `string`, `bool`)
+- Static type checking
+- Better compiler diagnostics
+
+### Milestone 4 — Modules and tooling
+
+- Imports/modules
+- Project manifests
+- `gb build`
+- `gb test`
+- `gb fmt`
+- Package foundations
+
+### Later
+
+- Native code generation
+- Memory-safety model
+- Concurrency / async
+- Standard library integration
+- Web/backend APIs
+- AI-native primitives
+- Package registry
+- Language server and editor tooling
+
+## Repository scope
+
+This is the flagship Genix language repository and contains the compiler/interpreter frontend and early developer tooling.
+
+```text
+src/
+├── ast.rs
+├── lexer.rs
+├── parser.rs
+├── interpreter.rs
+└── main.rs
+```
 
 ## Ecosystem
 
@@ -75,15 +163,25 @@ Advanced features such as AI primitives, async/concurrency, packages, web framew
 | Company | GenixBit |
 | Source extension | `.gb` |
 | CLI | `gb` |
-| Compiler | `gbc` |
+| Compiler | `gbc` (planned native compiler) |
 
 ## Development
 
-The initial compiler toolchain is being implemented in Rust. Architecture and contribution documentation will evolve alongside the first executable language prototype.
+The initial implementation is written in **Rust**. The current execution engine is an interpreter, allowing the syntax and semantics to mature before introducing native code generation.
+
+Run checks locally with:
+
+```bash
+cargo check
+cargo test
+cargo run -- run examples/hello.gb
+```
+
+GitHub Actions also runs the core compiler tests on pushes and pull requests.
 
 ## Project status
 
-Genix is experimental and not yet suitable for production use. Breaking language and compiler changes should be expected before the first stable release.
+Genix is experimental and **not yet suitable for production use**. Breaking changes should be expected before the first stable release.
 
 ---
 
