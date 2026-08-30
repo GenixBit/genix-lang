@@ -1,9 +1,13 @@
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::ast::{Expr, Function, Program, Stmt};
 use crate::{lexer, parser, typechecker};
+
+const GENIX_LANGUAGE_VERSION: &str = "0.0.1";
+const GENIX_RUNTIME_ABI: &str = "1";
 
 #[derive(Debug, Clone)]
 pub struct ProjectConfig {
@@ -17,6 +21,13 @@ pub struct LoadedProject {
     pub config: ProjectConfig,
     pub program: Program,
     pub imports: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StdlibCompatibility {
+    stdlib_version: String,
+    language_version: String,
+    runtime_abi: String,
 }
 
 pub fn create_project(path: &Path) -> Result<ProjectConfig, String> {
@@ -83,7 +94,7 @@ pub fn load_project(target: &Path) -> Result<LoadedProject, String> {
         }
         validate_module_name(module)?;
 
-        let module_path = source_dir.join(format!("{module}.gb"));
+        let module_path = resolve_module_path(&root, source_dir, module)?;
         let module_source = fs::read_to_string(&module_path)
             .map_err(|error| format!("could not read module {}: {error}", module_path.display()))?;
         let (nested_imports, stripped_module) = extract_imports(&module_source)?;
@@ -138,6 +149,104 @@ pub fn write_frontend_artifact(project: &LoadedProject) -> Result<PathBuf, Strin
     fs::write(&artifact_path, artifact)
         .map_err(|error| format!("could not write frontend build artifact: {error}"))?;
     Ok(artifact_path)
+}
+
+fn resolve_module_path(project_root: &Path, source_dir: &Path, module: &str) -> Result<PathBuf, String> {
+    let local = source_dir.join(format!("{module}.gb"));
+    if local.is_file() {
+        return Ok(local);
+    }
+
+    let stdlib_root = resolve_stdlib_root(project_root)?;
+    validate_stdlib_compatibility(&stdlib_root)?;
+    let standard = stdlib_root.join("modules").join(format!("{module}.gb"));
+    if standard.is_file() {
+        return Ok(standard);
+    }
+
+    Err(format!(
+        "module '{module}' was not found in '{}' or Genix stdlib '{}'",
+        source_dir.display(),
+        stdlib_root.display()
+    ))
+}
+
+fn resolve_stdlib_root(project_root: &Path) -> Result<PathBuf, String> {
+    if let Ok(path) = env::var("GENIX_STDLIB") {
+        let root = PathBuf::from(path);
+        if root.join("COMPATIBILITY").is_file() && root.join("modules").is_dir() {
+            return Ok(root);
+        }
+        return Err(format!(
+            "GENIX_STDLIB points to '{}', but COMPATIBILITY or modules/ is missing",
+            root.display()
+        ));
+    }
+
+    for candidate in [
+        project_root.join("genix-stdlib"),
+        project_root.join("../genix-stdlib"),
+        PathBuf::from("../genix-stdlib"),
+    ] {
+        if candidate.join("COMPATIBILITY").is_file() && candidate.join("modules").is_dir() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("standard-library module requested but Genix stdlib was not found; set GENIX_STDLIB to the genix-stdlib repository or installation directory".into())
+}
+
+fn validate_stdlib_compatibility(root: &Path) -> Result<(), String> {
+    let path = root.join("COMPATIBILITY");
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("could not read stdlib compatibility file {}: {error}", path.display()))?;
+    let compatibility = parse_stdlib_compatibility(&source)?;
+
+    if compatibility.language_version != GENIX_LANGUAGE_VERSION {
+        return Err(format!(
+            "Genix stdlib {} requires language {}, but compiler language version is {}",
+            compatibility.stdlib_version, compatibility.language_version, GENIX_LANGUAGE_VERSION
+        ));
+    }
+    if compatibility.runtime_abi != GENIX_RUNTIME_ABI {
+        return Err(format!(
+            "Genix stdlib {} requires runtime ABI {}, but compiler expects ABI {}",
+            compatibility.stdlib_version, compatibility.runtime_abi, GENIX_RUNTIME_ABI
+        ));
+    }
+    Ok(())
+}
+
+fn parse_stdlib_compatibility(source: &str) -> Result<StdlibCompatibility, String> {
+    let mut stdlib_version = None;
+    let mut language_version = None;
+    let mut runtime_abi = None;
+
+    for raw_line in source.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(format!("invalid stdlib COMPATIBILITY line '{line}'"));
+        };
+        let value = value.trim().to_string();
+        match key.trim() {
+            "GENIX_STDLIB_VERSION" => stdlib_version = Some(value),
+            "GENIX_LANGUAGE_VERSION" => language_version = Some(value),
+            "GENIX_RUNTIME_ABI" => runtime_abi = Some(value),
+            _ => {}
+        }
+    }
+
+    Ok(StdlibCompatibility {
+        stdlib_version: stdlib_version
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_STDLIB_VERSION".to_string())?,
+        language_version: language_version
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_LANGUAGE_VERSION".to_string())?,
+        runtime_abi: runtime_abi
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_RUNTIME_ABI".to_string())?,
+    })
 }
 
 fn normalize_project_root(target: &Path) -> Result<PathBuf, String> {
@@ -348,6 +457,17 @@ mod tests {
         let (imports, source) = extract_imports("import math;\nfn main() { print(math.add(1, 2)); }\n").unwrap();
         assert_eq!(imports, vec!["math"]);
         assert!(source.contains("fn main()"));
+    }
+
+    #[test]
+    fn parses_stdlib_compatibility() {
+        let compatibility = parse_stdlib_compatibility(
+            "GENIX_STDLIB_VERSION=0.0.1\nGENIX_LANGUAGE_VERSION=0.0.1\nGENIX_RUNTIME_ABI=1\n",
+        )
+        .unwrap();
+        assert_eq!(compatibility.stdlib_version, "0.0.1");
+        assert_eq!(compatibility.language_version, "0.0.1");
+        assert_eq!(compatibility.runtime_abi, "1");
     }
 
     #[test]
