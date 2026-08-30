@@ -111,6 +111,47 @@ jobs:
           echo "$output" | grep 'native-host-ok'
           rm -f intrinsic-demo.txt
 
+      - name: Check Option Result error handling
+        run: cargo run -- check examples/error_handling
+
+      - name: Inspect Option Result IR
+        run: |
+          output=$(cargo run --quiet -- ir examples/error_handling)
+          echo "$output"
+          echo "$output" | grep 'Result<string,string>'
+          echo "$output" | grep 'Option<string>'
+          echo "$output" | grep 'match'
+
+      - name: Run safe IO through interpreter
+        run: |
+          unset GENIX_CI_MISSING_VALUE || true
+          output=$(cargo run --quiet -- run examples/error_handling)
+          echo "$output"
+          echo "$output" | grep 'missing-env-ok'
+          echo "$output" | grep 'Genix safe IO'
+          rm -f genix-safe-io.txt
+
+      - name: Build safe IO native executable
+        run: cargo run -- build examples/error_handling
+
+      - name: Verify Option Result native lowering
+        run: |
+          grep 'GbOptionString' examples/error_handling/build/error-handling-demo.c
+          grep 'GbResultString' examples/error_handling/build/error-handling-demo.c
+          grep 'gb_env_get_option' examples/error_handling/build/error-handling-demo.c
+          grep 'gb_fs_try_read_text' examples/error_handling/build/error-handling-demo.c
+          grep 'gb_fs_try_write_text' examples/error_handling/build/error-handling-demo.c
+          grep '\.ok' examples/error_handling/build/error-handling-demo.c
+
+      - name: Execute safe IO native binary
+        run: |
+          unset GENIX_CI_MISSING_VALUE || true
+          output=$(./examples/error_handling/build/error-handling-demo)
+          echo "$output"
+          echo "$output" | grep 'missing-env-ok'
+          echo "$output" | grep 'Genix safe IO'
+          rm -f genix-safe-io.txt
+
       - name: Build native debug executable with runtime
         run: cargo run -- build examples/project
 
