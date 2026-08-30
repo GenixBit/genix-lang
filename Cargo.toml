@@ -1,0 +1,12 @@
+[package]
+name = "genix-lang"
+version = "0.0.1"
+edition = "2021"
+description = "Core compiler and language implementation for Genix"
+publish = false
+
+[[bin]]
+name = "gb"
+path = "src/main.rs"
+
+[dependencies]
