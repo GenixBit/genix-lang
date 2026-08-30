@@ -136,6 +136,181 @@ impl Diagnostic {
     }
 }
 
+pub fn type_diagnostic(message: &str, source_name: &str, source: &str) -> Diagnostic {
+    let clean = message.strip_prefix("type error: ").unwrap_or(message);
+    let code = classify_type_error(clean);
+    let mut diagnostic = Diagnostic::type_error(code, clean.to_string())
+        .with_source_name(source_name.to_string());
+
+    match code {
+        "E0201" => {
+            diagnostic = diagnostic
+                .with_label("type mismatch")
+                .with_help("change the expression or annotation so the types are compatible");
+        }
+        "E0202" => {
+            diagnostic = diagnostic
+                .with_label("name is not defined here")
+                .with_help("check the spelling, declaration, or imported module");
+        }
+        "E0203" => {
+            diagnostic = diagnostic
+                .with_label("immutable binding")
+                .with_help("declare the variable with `mut` if reassignment is intended");
+        }
+        "E0204" => {
+            diagnostic = diagnostic
+                .with_label("invalid return")
+                .with_help("make every return value match the function return type");
+        }
+        "E0205" => {
+            diagnostic = diagnostic
+                .with_label("invalid or non-exhaustive match")
+                .with_help("Option needs Some/None; Result needs Ok/Err");
+        }
+        "E0206" => {
+            diagnostic = diagnostic
+                .with_label("invalid '?' propagation")
+                .with_help("use '?' only with Result<T,string> in a Result-returning function");
+        }
+        "E0207" => {
+            diagnostic = diagnostic
+                .with_label("function call does not match its signature")
+                .with_help("check the number and types of the arguments");
+        }
+        "E0209" => {
+            diagnostic = diagnostic
+                .with_label("duplicate declaration")
+                .with_help("rename or remove the duplicate declaration");
+        }
+        "E0210" => {
+            diagnostic = diagnostic.with_help("define `fn main() { ... }` with no parameters or return type");
+        }
+        _ => {}
+    }
+
+    if let Some(span) = locate_type_error(clean, source) {
+        diagnostic.span = Some(span);
+    }
+    diagnostic
+}
+
+fn classify_type_error(message: &str) -> &'static str {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("undefined variable") || lower.contains("undefined function") {
+        "E0202"
+    } else if lower.contains("immutable variable") || lower.contains("cannot assign to immutable") {
+        "E0203"
+    } else if lower.contains("return") || lower.contains("guaranteed return") {
+        "E0204"
+    } else if lower.contains("match") || lower.contains("pattern") {
+        "E0205"
+    } else if lower.contains("'?'") || lower.contains("?'") || lower.contains("operator '?'") {
+        "E0206"
+    } else if lower.contains("argument") || lower.contains("expects") && lower.contains("found") {
+        "E0207"
+    } else if lower.contains("defined more than once")
+        || lower.contains("already declared")
+        || lower.contains("duplicate parameter")
+    {
+        "E0209"
+    } else if lower.contains("fn main") || lower.contains("must define fn main") {
+        "E0210"
+    } else if lower.contains("expected") && lower.contains("found")
+        || lower.contains("requires numeric")
+        || lower.contains("requires bool")
+        || lower.contains("requires a number")
+        || lower.contains("comparison requires")
+        || lower.contains("logical operator requires")
+    {
+        "E0201"
+    } else if lower.contains("void")
+        || lower.contains("none requires")
+        || lower.contains("err(...)")
+        || lower.contains("some(")
+        || lower.contains("print() cannot")
+    {
+        "E0208"
+    } else {
+        "E0299"
+    }
+}
+
+fn locate_type_error(message: &str, source: &str) -> Option<Span> {
+    let lines: Vec<&str> = source.lines().collect();
+
+    if let Some(name) = quoted_after(message, "initializer for '") {
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| {
+            line.contains(&format!("let {name}")) || line.contains(&format!("mut {name}"))
+        }) {
+            return initializer_span(index + 1, line);
+        }
+    }
+
+    if let Some(name) = quoted_after(message, "assignment to '")
+        .or_else(|| quoted_after(message, "undefined variable '"))
+        .or_else(|| quoted_after(message, "immutable variable '"))
+        .or_else(|| quoted_after(message, "variable '"))
+    {
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| line.contains(&name)) {
+            let column = line.find(&name).unwrap_or(0) + 1;
+            return Some(Span::single(index + 1, column, name.chars().count()));
+        }
+    }
+
+    if let Some(name) = quoted_after(message, "function '") {
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| line.contains(&format!("{name}("))) {
+            let column = line.find(&name).unwrap_or(0) + 1;
+            return Some(Span::single(index + 1, column, name.chars().count()));
+        }
+    }
+
+    let preferred = if message.contains("if condition") {
+        Some("if ")
+    } else if message.contains("while condition") {
+        Some("while ")
+    } else if message.contains("match") || message.contains("pattern") {
+        Some("match ")
+    } else if message.contains("return") {
+        Some("return")
+    } else {
+        None
+    };
+
+    if let Some(needle) = preferred {
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| line.contains(needle)) {
+            let column = line.find(needle).unwrap_or(0) + 1;
+            return Some(Span::single(index + 1, column, needle.trim().chars().count().max(1)));
+        }
+    }
+
+    lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| !line.trim().is_empty())
+        .map(|(index, line)| {
+            let column = line.chars().position(|ch| !ch.is_whitespace()).unwrap_or(0) + 1;
+            Span::single(index + 1, column, line.trim().chars().count().max(1))
+        })
+}
+
+fn initializer_span(line_number: usize, line: &str) -> Option<Span> {
+    let equal = line.find('=')?;
+    let after_equal = &line[equal + 1..];
+    let leading = after_equal.chars().take_while(|ch| ch.is_whitespace()).count();
+    let value_start = equal + 1 + leading;
+    let value_text = after_equal.trim_start().trim_end_matches(';').trim_end();
+    let width = value_text.chars().count().max(1);
+    Some(Span::single(line_number, value_start + 1, width))
+}
+
+fn quoted_after(message: &str, prefix: &str) -> Option<String> {
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
+}
+
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "error[{}]: {}", self.code, self.message)
@@ -168,5 +343,18 @@ mod tests {
             .with_source_name("src/main.gb");
         assert_eq!(diagnostic.source_name.as_deref(), Some("src/main.gb"));
         assert_eq!(diagnostic.span.unwrap().column, 2);
+    }
+
+    #[test]
+    fn maps_type_mismatch_to_initializer_value() {
+        let source = "fn main() {\n    let age: int = \"twenty\";\n}\n";
+        let diagnostic = type_diagnostic(
+            "type error: initializer for 'age' expected int, found string",
+            "src/main.gb",
+            source,
+        );
+        assert_eq!(diagnostic.code, "E0201");
+        assert_eq!(diagnostic.span.unwrap().line, 2);
+        assert!(diagnostic.span.unwrap().column > 10);
     }
 }
