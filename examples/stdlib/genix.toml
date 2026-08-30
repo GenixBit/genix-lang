@@ -1,0 +1,4 @@
+[project]
+name = "stdlib-demo"
+version = "0.1.0"
+entry = "src/main.gb"
