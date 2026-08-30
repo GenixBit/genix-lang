@@ -1,5 +1,6 @@
 mod ast;
 mod codegen;
+mod diagnostics;
 mod interpreter;
 mod ir;
 mod lexer;
@@ -42,7 +43,14 @@ fn main() {
     };
 
     if let Err(error) = result {
-        eprintln!("Genix error: {error}");
+        if error.starts_with("error[") {
+            eprint!("{error}");
+            if !error.ends_with('\n') {
+                eprintln!();
+            }
+        } else {
+            eprintln!("Genix error: {error}");
+        }
         process::exit(1);
     }
 }
@@ -62,7 +70,7 @@ fn create_project(path: &str) -> Result<(), String> {
 fn run_target(target: Option<&str>) -> Result<(), String> {
     if let Some(path) = target.filter(|path| is_gb_file(path)) {
         let source = read_source(path)?;
-        return run_source(&source);
+        return run_source(path, &source);
     }
 
     let root = target.unwrap_or(".");
@@ -73,7 +81,7 @@ fn run_target(target: Option<&str>) -> Result<(), String> {
 fn check_target(target: Option<&str>) -> Result<(), String> {
     if let Some(path) = target.filter(|path| is_gb_file(path)) {
         let source = read_source(path)?;
-        check_source(&source)?;
+        check_source(path, &source)?;
         println!("✓ {path} passed Genix syntax and type checks");
         return Ok(());
     }
@@ -90,7 +98,7 @@ fn check_target(target: Option<&str>) -> Result<(), String> {
 fn ir_target(target: Option<&str>) -> Result<(), String> {
     if let Some(path) = target.filter(|path| is_gb_file(path)) {
         let source = read_source(path)?;
-        let ast = compile_frontend(&source)?;
+        let ast = compile_frontend(path, &source)?;
         let lowered = ir::lower(&ast)?;
         print!("{}", ir::format(&lowered));
         return Ok(());
@@ -157,20 +165,27 @@ fn is_gb_file(path: &str) -> bool {
     Path::new(path).extension().and_then(|value| value.to_str()) == Some("gb")
 }
 
-fn compile_frontend(source: &str) -> Result<ast::Program, String> {
-    let tokens = lexer::lex(source)?;
-    let program = parser::parse(tokens)?;
-    typechecker::check(&program)?;
+fn compile_frontend(source_name: &str, source: &str) -> Result<ast::Program, String> {
+    let tokens = lexer::lex(source).map_err(|diagnostic| {
+        diagnostic
+            .with_source_name(source_name.to_string())
+            .render(Some(source))
+    })?;
+    let program = parser::parse_named(tokens, source_name)
+        .map_err(|diagnostic| diagnostic.render(Some(source)))?;
+    typechecker::check(&program).map_err(|error| {
+        diagnostics::type_diagnostic(&error, source_name, source).render(Some(source))
+    })?;
     Ok(program)
 }
 
-fn check_source(source: &str) -> Result<(), String> {
-    compile_frontend(source)?;
+fn check_source(source_name: &str, source: &str) -> Result<(), String> {
+    compile_frontend(source_name, source)?;
     Ok(())
 }
 
-fn run_source(source: &str) -> Result<(), String> {
-    let program = compile_frontend(source)?;
+fn run_source(source_name: &str, source: &str) -> Result<(), String> {
+    let program = compile_frontend(source_name, source)?;
     interpreter::execute(&program)
 }
 
