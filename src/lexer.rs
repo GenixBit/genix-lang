@@ -2,6 +2,10 @@
 pub enum TokenKind {
     Fn,
     Let,
+    Mut,
+    If,
+    Else,
+    While,
     True,
     False,
     Identifier(String),
@@ -14,6 +18,15 @@ pub enum TokenKind {
     RBrace,
     Semicolon,
     Equal,
+    EqualEqual,
+    Bang,
+    BangEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    AndAnd,
+    OrOr,
     Plus,
     Minus,
     Star,
@@ -59,7 +72,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
             '{' => push_simple(&mut tokens, TokenKind::LBrace, line, column, &mut i, &mut column),
             '}' => push_simple(&mut tokens, TokenKind::RBrace, line, column, &mut i, &mut column),
             ';' => push_simple(&mut tokens, TokenKind::Semicolon, line, column, &mut i, &mut column),
+            '=' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::EqualEqual, line, column, &mut i, &mut column),
             '=' => push_simple(&mut tokens, TokenKind::Equal, line, column, &mut i, &mut column),
+            '!' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::BangEqual, line, column, &mut i, &mut column),
+            '!' => push_simple(&mut tokens, TokenKind::Bang, line, column, &mut i, &mut column),
+            '<' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::LessEqual, line, column, &mut i, &mut column),
+            '<' => push_simple(&mut tokens, TokenKind::Less, line, column, &mut i, &mut column),
+            '>' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::GreaterEqual, line, column, &mut i, &mut column),
+            '>' => push_simple(&mut tokens, TokenKind::Greater, line, column, &mut i, &mut column),
+            '&' if matches_next(&chars, i, '&') => push_double(&mut tokens, TokenKind::AndAnd, line, column, &mut i, &mut column),
+            '|' if matches_next(&chars, i, '|') => push_double(&mut tokens, TokenKind::OrOr, line, column, &mut i, &mut column),
             '+' => push_simple(&mut tokens, TokenKind::Plus, line, column, &mut i, &mut column),
             '-' => push_simple(&mut tokens, TokenKind::Minus, line, column, &mut i, &mut column),
             '*' => push_simple(&mut tokens, TokenKind::Star, line, column, &mut i, &mut column),
@@ -86,11 +108,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                             i += 2;
                             column += 2;
                         }
-                        '\n' => {
-                            return Err(format!(
-                                "unterminated string at {start_line}:{start_column}"
-                            ));
-                        }
+                        '\n' => return Err(format!("unterminated string at {start_line}:{start_column}")),
                         c => {
                             value.push(c);
                             i += 1;
@@ -100,9 +118,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 }
 
                 if i >= chars.len() {
-                    return Err(format!(
-                        "unterminated string at {start_line}:{start_column}"
-                    ));
+                    return Err(format!("unterminated string at {start_line}:{start_column}"));
                 }
 
                 i += 1;
@@ -133,20 +149,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
 
                 let text: String = chars[start..i].iter().collect();
                 let kind = if has_dot {
-                    TokenKind::Float(text.parse().map_err(|_| {
-                        format!("invalid float '{text}' at {line}:{start_column}")
-                    })?)
+                    TokenKind::Float(text.parse().map_err(|_| format!("invalid float '{text}' at {line}:{start_column}"))?)
                 } else {
-                    TokenKind::Integer(text.parse().map_err(|_| {
-                        format!("invalid integer '{text}' at {line}:{start_column}")
-                    })?)
+                    TokenKind::Integer(text.parse().map_err(|_| format!("invalid integer '{text}' at {line}:{start_column}"))?)
                 };
 
-                tokens.push(Token {
-                    kind,
-                    line,
-                    column: start_column,
-                });
+                tokens.push(Token { kind, line, column: start_column });
             }
             c if is_identifier_start(c) => {
                 let start = i;
@@ -163,43 +171,41 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 let kind = match text.as_str() {
                     "fn" => TokenKind::Fn,
                     "let" => TokenKind::Let,
+                    "mut" => TokenKind::Mut,
+                    "if" => TokenKind::If,
+                    "else" => TokenKind::Else,
+                    "while" => TokenKind::While,
                     "true" => TokenKind::True,
                     "false" => TokenKind::False,
                     _ => TokenKind::Identifier(text),
                 };
 
-                tokens.push(Token {
-                    kind,
-                    line,
-                    column: start_column,
-                });
+                tokens.push(Token { kind, line, column: start_column });
             }
-            other => {
-                return Err(format!("unexpected character '{other}' at {line}:{column}"));
-            }
+            '&' => return Err(format!("unexpected '&' at {line}:{column}; use '&&' for logical and")),
+            '|' => return Err(format!("unexpected '|' at {line}:{column}; use '||' for logical or")),
+            other => return Err(format!("unexpected character '{other}' at {line}:{column}")),
         }
     }
 
-    tokens.push(Token {
-        kind: TokenKind::Eof,
-        line,
-        column,
-    });
-
+    tokens.push(Token { kind: TokenKind::Eof, line, column });
     Ok(tokens)
 }
 
-fn push_simple(
-    tokens: &mut Vec<Token>,
-    kind: TokenKind,
-    line: usize,
-    column: usize,
-    i: &mut usize,
-    current_column: &mut usize,
-) {
+fn matches_next(chars: &[char], i: usize, expected: char) -> bool {
+    i + 1 < chars.len() && chars[i + 1] == expected
+}
+
+fn push_simple(tokens: &mut Vec<Token>, kind: TokenKind, line: usize, column: usize, i: &mut usize, current_column: &mut usize) {
     tokens.push(Token { kind, line, column });
     *i += 1;
     *current_column += 1;
+}
+
+fn push_double(tokens: &mut Vec<Token>, kind: TokenKind, line: usize, column: usize, i: &mut usize, current_column: &mut usize) {
+    tokens.push(Token { kind, line, column });
+    *i += 2;
+    *current_column += 2;
 }
 
 fn is_identifier_start(ch: char) -> bool {
@@ -220,5 +226,15 @@ mod tests {
         assert!(matches!(tokens[0].kind, TokenKind::Fn));
         assert!(matches!(tokens[1].kind, TokenKind::Identifier(ref name) if name == "main"));
         assert!(tokens.iter().any(|token| matches!(token.kind, TokenKind::String(ref value) if value == "Hello")));
+    }
+
+    #[test]
+    fn lexes_control_flow_and_boolean_operators() {
+        let tokens = lex("fn main() { mut x = 0; while x < 3 && x != 9 { x = x + 1; } if !false { print(x); } }").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Mut)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::While)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::AndAnd)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::BangEqual)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::If)));
     }
 }
