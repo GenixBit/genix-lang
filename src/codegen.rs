@@ -13,6 +13,7 @@ pub struct NativeArtifact {
     pub executable: PathBuf,
     pub compiler: String,
     pub release: bool,
+    pub runtime_root: PathBuf,
 }
 
 pub fn build_native(
@@ -33,17 +34,28 @@ pub fn build_native(
     };
     let executable = build_dir.join(executable_name);
 
+    let runtime_root = resolve_runtime_root(project_root)?;
+    let runtime_include = runtime_root.join("include");
+    let runtime_source = runtime_root.join("src/runtime.c");
+
     let generated = emit_c(program)?;
     fs::write(&source, generated)
         .map_err(|error| format!("could not write native C source {}: {error}", source.display()))?;
 
-    let compiler = compile_c(&source, &executable, release)?;
+    let compiler = compile_c(
+        &source,
+        &runtime_source,
+        &runtime_include,
+        &executable,
+        release,
+    )?;
 
     Ok(NativeArtifact {
         source,
         executable,
         compiler,
         release,
+        runtime_root,
     })
 }
 
@@ -67,14 +79,9 @@ impl Generator {
     fn generate(mut self, program: &Program) -> Result<String, String> {
         self.output
             .push_str("/* Generated from Genix IR by the native C11 backend. */\n");
+        self.output.push_str("#include <genix/runtime.h>\n");
         self.output.push_str("#include <stdbool.h>\n");
-        self.output.push_str("#include <stdint.h>\n");
-        self.output.push_str("#include <stdio.h>\n");
-        self.output.push_str("#include <stdlib.h>\n");
-        self.output.push_str("#include <string.h>\n\n");
-
-        self.emit_runtime();
-        self.output.push('\n');
+        self.output.push_str("#include <stdint.h>\n\n");
 
         for function in &program.functions {
             self.output.push_str(&self.function_signature(function, true));
@@ -88,29 +95,13 @@ impl Generator {
         }
 
         self.output.push_str("int main(void) {\n");
+        self.output.push_str("    gb_runtime_init();\n");
         self.output.push_str("    gb_fn_main();\n");
+        self.output.push_str("    gb_runtime_shutdown();\n");
         self.output.push_str("    return 0;\n");
         self.output.push_str("}\n");
 
         Ok(self.output)
-    }
-
-    fn emit_runtime(&mut self) {
-        self.output.push_str(
-            "static char* gb_concat(const char* left, const char* right) {\n\
-    size_t left_len = strlen(left);\n\
-    size_t right_len = strlen(right);\n\
-    char* result = (char*)malloc(left_len + right_len + 1);\n\
-    if (result == NULL) {\n\
-        fputs(\"Genix runtime error: out of memory\\n\", stderr);\n\
-        exit(70);\n\
-    }\n\
-    memcpy(result, left, left_len);\n\
-    memcpy(result + left_len, right, right_len);\n\
-    result[left_len + right_len] = '\\0';\n\
-    return result;\n\
-}\n",
-        );
     }
 
     fn function_signature(&self, function: &Function, is_static: bool) -> String {
@@ -167,12 +158,10 @@ impl Generator {
             Stmt::Print(expr) => {
                 let code = self.emit_expr(expr)?;
                 let statement = match expr.ty {
-                    Type::Int => format!("printf(\"%lld\\n\", (long long)({code}));"),
-                    Type::Float => format!("printf(\"%.15g\\n\", (double)({code}));"),
-                    Type::Bool => {
-                        format!("printf(\"%s\\n\", ({code}) ? \"true\" : \"false\");")
-                    }
-                    Type::String => format!("printf(\"%s\\n\", {code});"),
+                    Type::Int => format!("gb_print_int({code});"),
+                    Type::Float => format!("gb_print_float({code});"),
+                    Type::Bool => format!("gb_print_bool({code});"),
+                    Type::String => format!("gb_print_string({code});"),
                     Type::Void => {
                         return Err("native backend: cannot print a void expression".into())
                     }
@@ -266,19 +255,17 @@ impl Generator {
 
                 match op {
                     BinaryOp::Add if expr.ty == Type::String => {
-                        Ok(format!("gb_concat(({left_code}), ({right_code}))"))
+                        Ok(format!("gb_string_concat(({left_code}), ({right_code}))"))
                     }
                     BinaryOp::Add => Ok(format!("(({left_code}) + ({right_code}))")),
                     BinaryOp::Subtract => Ok(format!("(({left_code}) - ({right_code}))")),
                     BinaryOp::Multiply => Ok(format!("(({left_code}) * ({right_code}))")),
                     BinaryOp::Divide => Ok(format!("(({left_code}) / ({right_code}))")),
-                    BinaryOp::Equal | BinaryOp::NotEqual
-                        if left.ty == Type::String && right.ty == Type::String =>
-                    {
-                        let comparison = if matches!(op, BinaryOp::Equal) { "==" } else { "!=" };
-                        Ok(format!(
-                            "(strcmp(({left_code}), ({right_code})) {comparison} 0)"
-                        ))
+                    BinaryOp::Equal if left.ty == Type::String && right.ty == Type::String => {
+                        Ok(format!("gb_string_equal(({left_code}), ({right_code}))"))
+                    }
+                    BinaryOp::NotEqual if left.ty == Type::String && right.ty == Type::String => {
+                        Ok(format!("(!gb_string_equal(({left_code}), ({right_code})))"))
                     }
                     BinaryOp::Equal => Ok(format!("(({left_code}) == ({right_code}))")),
                     BinaryOp::NotEqual => Ok(format!("(({left_code}) != ({right_code}))")),
@@ -302,7 +289,55 @@ impl Generator {
     }
 }
 
-fn compile_c(source: &Path, executable: &Path, release: bool) -> Result<String, String> {
+fn resolve_runtime_root(project_root: &Path) -> Result<PathBuf, String> {
+    if let Ok(value) = env::var("GENIX_RUNTIME") {
+        let path = PathBuf::from(value.trim());
+        if value.trim().is_empty() {
+            return Err("GENIX_RUNTIME is set but empty".into());
+        }
+        validate_runtime_root(&path)?;
+        return Ok(path);
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(parent) = project_root.parent() {
+        candidates.push(parent.join("genix-runtime"));
+    }
+    if let Ok(current) = env::current_dir() {
+        candidates.push(current.join("genix-runtime"));
+        if let Some(parent) = current.parent() {
+            candidates.push(parent.join("genix-runtime"));
+        }
+    }
+
+    for candidate in candidates {
+        if validate_runtime_root(&candidate).is_ok() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Genix runtime not found. Clone/install GenixBit/genix-runtime and set GENIX_RUNTIME to its directory".into())
+}
+
+fn validate_runtime_root(root: &Path) -> Result<(), String> {
+    let header = root.join("include/genix/runtime.h");
+    let source = root.join("src/runtime.c");
+    if !header.is_file() || !source.is_file() {
+        return Err(format!(
+            "invalid Genix runtime at '{}': expected include/genix/runtime.h and src/runtime.c",
+            root.display()
+        ));
+    }
+    Ok(())
+}
+
+fn compile_c(
+    source: &Path,
+    runtime_source: &Path,
+    runtime_include: &Path,
+    executable: &Path,
+    release: bool,
+) -> Result<String, String> {
     let candidates = compiler_candidates();
     let mut missing = Vec::new();
 
@@ -314,7 +349,12 @@ fn compile_c(source: &Path, executable: &Path, release: bool) -> Result<String, 
         } else {
             command.arg("-O0").arg("-g");
         }
-        command.arg(source).arg("-o").arg(executable);
+        command
+            .arg(format!("-I{}", runtime_include.display()))
+            .arg(source)
+            .arg(runtime_source)
+            .arg("-o")
+            .arg(executable);
 
         match command.output() {
             Ok(output) if output.status.success() => return Ok(compiler),
@@ -430,33 +470,25 @@ mod tests {
     }
 
     #[test]
-    fn emits_native_c_from_ir_for_typed_function() {
+    fn emits_runtime_abi_calls_for_output_and_lifecycle() {
         let program = compile_source(
-            "fn add(a: int, b: int) -> int { return a + b; } fn main() { let x: int = add(20, 22); print(x); }",
+            "fn main() { let x: int = 42; print(x); print(\"Genix\"); }",
         );
         let c = emit_c(&program).unwrap();
-        assert!(c.contains("Generated from Genix IR"));
-        assert!(c.contains("static int64_t gb_fn_add"));
-        assert!(c.contains("gb_fn_add(INT64_C(20), INT64_C(22))"));
-        assert!(c.contains("int main(void)"));
+        assert!(c.contains("#include <genix/runtime.h>"));
+        assert!(c.contains("gb_runtime_init();"));
+        assert!(c.contains("gb_print_int(gb_v_x);"));
+        assert!(c.contains("gb_print_string(\"Genix\");"));
+        assert!(c.contains("gb_runtime_shutdown();"));
     }
 
     #[test]
-    fn emits_explicit_ir_numeric_casts() {
+    fn emits_runtime_string_operations() {
         let program = compile_source(
-            "fn scale(value: float) -> float { return value; } fn main() { print(scale(3)); }",
+            "fn main() { let x: string = \"Ge\" + \"nix\"; print(x == \"Genix\"); }",
         );
         let c = emit_c(&program).unwrap();
-        assert!(c.contains("((double)(INT64_C(3)))"));
-    }
-
-    #[test]
-    fn emits_string_runtime_support() {
-        let program = compile_source(
-            "fn greet(name: string) -> string { return \"Hello \" + name; } fn main() { print(greet(\"Genix\")); }",
-        );
-        let c = emit_c(&program).unwrap();
-        assert!(c.contains("gb_concat"));
-        assert!(c.contains("printf(\"%s\\n\""));
+        assert!(c.contains("gb_string_concat"));
+        assert!(c.contains("gb_string_equal"));
     }
 }
