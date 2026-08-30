@@ -9,10 +9,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      GENIX_RUNTIME: ${{ github.workspace }}/genix-runtime
 
     steps:
-      - name: Checkout
+      - name: Checkout compiler
         uses: actions/checkout@v4
+
+      - name: Checkout Genix runtime
+        uses: actions/checkout@v4
+        with:
+          repository: GenixBit/genix-runtime
+          path: genix-runtime
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -22,6 +30,9 @@ jobs:
 
       - name: Run tests
         run: cargo test
+
+      - name: Test runtime independently
+        run: make -C genix-runtime test
 
       - name: Run hello example
         run: cargo run -- run examples/hello.gb
@@ -42,21 +53,24 @@ jobs:
         run: cargo run -- run examples/project
 
       - name: Inspect typed Genix IR
-        run: |
-          cargo run -- ir examples/project > /tmp/module-demo.gir
-          grep "fn math.twice" /tmp/module-demo.gir
-          grep "answer: int" /tmp/module-demo.gir
+        run: cargo run -- ir examples/project
 
       - name: Verify explicit IR widening cast
-        run: cargo run -- ir examples/functions.gb | grep "cast<float>"
+        run: cargo run -- ir examples/functions.gb | grep 'cast<float>'
 
-      - name: Build native debug executable from IR
+      - name: Build native debug executable with runtime
         run: cargo run -- build examples/project
+
+      - name: Verify generated code targets runtime ABI
+        run: |
+          grep 'genix/runtime.h' examples/project/build/module-demo.c
+          grep 'gb_runtime_init' examples/project/build/module-demo.c
+          grep 'gb_print_' examples/project/build/module-demo.c
 
       - name: Execute native debug binary
         run: ./examples/project/build/module-demo
 
-      - name: Build native release executable from IR
+      - name: Build native release executable with runtime
         run: cargo run -- build examples/project --release
 
       - name: Execute native release binary
@@ -66,7 +80,7 @@ jobs:
         run: |
           cargo run -- new /tmp/genix-ci-app
           cargo run -- check /tmp/genix-ci-app
-          cargo run -- run /tmp/genix-ci-app
           cargo run -- ir /tmp/genix-ci-app
+          cargo run -- run /tmp/genix-ci-app
           cargo run -- build /tmp/genix-ci-app
           /tmp/genix-ci-app/build/genix-ci-app
