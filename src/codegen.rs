@@ -7,6 +7,8 @@ use std::process::Command;
 use crate::ast::{BinaryOp, Type, UnaryOp};
 use crate::ir::{Expr, ExprKind, Function, Program, Stmt};
 
+const REQUIRED_RUNTIME_ABI: &str = "1";
+
 #[derive(Debug, Clone)]
 pub struct NativeArtifact {
     pub source: PathBuf,
@@ -128,11 +130,9 @@ impl Generator {
         self.output.push_str(&self.function_signature(function, true));
         self.output.push_str(" {\n");
         self.indent = 1;
-
         for statement in &function.body {
             self.emit_statement(statement)?;
         }
-
         self.indent = 0;
         self.output.push_str("}\n");
         Ok(())
@@ -140,16 +140,9 @@ impl Generator {
 
     fn emit_statement(&mut self, statement: &Stmt) -> Result<(), String> {
         match statement {
-            Stmt::Let {
-                name, value, ty, ..
-            } => {
+            Stmt::Let { name, value, ty, .. } => {
                 let code = self.emit_expr(value)?;
-                self.line(format!(
-                    "{} {} = {};",
-                    c_type(*ty),
-                    c_variable_name(name),
-                    code
-                ));
+                self.line(format!("{} {} = {};", c_type(*ty), c_variable_name(name), code));
             }
             Stmt::Assign { name, value } => {
                 let code = self.emit_expr(value)?;
@@ -162,9 +155,7 @@ impl Generator {
                     Type::Float => format!("gb_print_float({code});"),
                     Type::Bool => format!("gb_print_bool({code});"),
                     Type::String => format!("gb_print_string({code});"),
-                    Type::Void => {
-                        return Err("native backend: cannot print a void expression".into())
-                    }
+                    Type::Void => return Err("native backend: cannot print a void expression".into()),
                 };
                 self.line(statement);
             }
@@ -177,11 +168,7 @@ impl Generator {
                 self.line(format!("return {code};"));
             }
             Stmt::Return(None) => self.line("return;"),
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
+            Stmt::If { condition, then_branch, else_branch } => {
                 let condition = self.emit_expr(condition)?;
                 self.line(format!("if ({condition}) {{"));
                 self.indent += 1;
@@ -189,7 +176,6 @@ impl Generator {
                     self.emit_statement(statement)?;
                 }
                 self.indent -= 1;
-
                 if let Some(else_branch) = else_branch {
                     self.line("} else {");
                     self.indent += 1;
@@ -236,7 +222,11 @@ impl Generator {
                     .map(|argument| self.emit_expr(argument))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                Ok(format!("{}({args})", c_function_name(callee)))
+                if let Some(symbol) = intrinsic_runtime_symbol(callee) {
+                    Ok(format!("{symbol}({args})"))
+                } else {
+                    Ok(format!("{}({args})", c_function_name(callee)))
+                }
             }
             ExprKind::Cast { expr, to } => {
                 let code = self.emit_expr(expr)?;
@@ -252,7 +242,6 @@ impl Generator {
             ExprKind::Binary { left, op, right } => {
                 let left_code = self.emit_expr(left)?;
                 let right_code = self.emit_expr(right)?;
-
                 match op {
                     BinaryOp::Add if expr.ty == Type::String => {
                         Ok(format!("gb_string_concat(({left_code}), ({right_code}))"))
@@ -286,6 +275,17 @@ impl Generator {
         }
         self.output.push_str(line.as_ref());
         self.output.push('\n');
+    }
+}
+
+fn intrinsic_runtime_symbol(callee: &str) -> Option<&'static str> {
+    match callee {
+        "io.input" => Some("gb_input"),
+        "process.env" => Some("gb_env_get"),
+        "process.exit" => Some("gb_process_exit"),
+        "fs.read_text" => Some("gb_fs_read_text"),
+        "fs.write_text" => Some("gb_fs_write_text"),
+        _ => None,
     }
 }
 
@@ -328,6 +328,16 @@ fn validate_runtime_root(root: &Path) -> Result<(), String> {
             root.display()
         ));
     }
+
+    let header_text = fs::read_to_string(&header)
+        .map_err(|error| format!("could not read runtime header {}: {error}", header.display()))?;
+    let expected = format!("#define GENIX_RUNTIME_ABI_VERSION {REQUIRED_RUNTIME_ABI}");
+    if !header_text.lines().any(|line| line.trim() == expected) {
+        return Err(format!(
+            "Genix runtime at '{}' is not ABI {}; expected '{}' in include/genix/runtime.h",
+            root.display(), REQUIRED_RUNTIME_ABI, expected
+        ));
+    }
     Ok(())
 }
 
@@ -361,15 +371,10 @@ fn compile_c(
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                return Err(format!(
-                    "native C compiler '{compiler}' failed\n{}{}",
-                    stdout, stderr
-                ));
+                return Err(format!("native C compiler '{compiler}' failed\n{}{}", stdout, stderr));
             }
             Err(error) if error.kind() == ErrorKind::NotFound => missing.push(compiler),
-            Err(error) => {
-                return Err(format!("could not start native C compiler '{compiler}': {error}"))
-            }
+            Err(error) => return Err(format!("could not start native C compiler '{compiler}': {error}")),
         }
     }
 
@@ -387,7 +392,6 @@ fn compiler_candidates() -> Vec<String> {
             result.push(cc.to_string());
         }
     }
-
     for compiler in ["cc", "clang", "gcc"] {
         if !result.iter().any(|candidate| candidate == compiler) {
             result.push(compiler.to_string());
@@ -417,13 +421,7 @@ fn c_variable_name(name: &str) -> String {
 fn sanitize_identifier(value: &str) -> String {
     value
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                ch
-            } else {
-                '_'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() || ch == '_' { ch } else { '_' })
         .collect()
 }
 
@@ -471,9 +469,7 @@ mod tests {
 
     #[test]
     fn emits_runtime_abi_calls_for_output_and_lifecycle() {
-        let program = compile_source(
-            "fn main() { let x: int = 42; print(x); print(\"Genix\"); }",
-        );
+        let program = compile_source("fn main() { let x: int = 42; print(x); print(\"Genix\"); }");
         let c = emit_c(&program).unwrap();
         assert!(c.contains("#include <genix/runtime.h>"));
         assert!(c.contains("gb_runtime_init();"));
@@ -484,11 +480,18 @@ mod tests {
 
     #[test]
     fn emits_runtime_string_operations() {
-        let program = compile_source(
-            "fn main() { let x: string = \"Ge\" + \"nix\"; print(x == \"Genix\"); }",
-        );
+        let program = compile_source("fn main() { let x: string = \"Ge\" + \"nix\"; print(x == \"Genix\"); }");
         let c = emit_c(&program).unwrap();
         assert!(c.contains("gb_string_concat"));
         assert!(c.contains("gb_string_equal"));
+    }
+
+    #[test]
+    fn maps_stdlib_intrinsics_to_runtime_symbols() {
+        assert_eq!(intrinsic_runtime_symbol("io.input"), Some("gb_input"));
+        assert_eq!(intrinsic_runtime_symbol("fs.read_text"), Some("gb_fs_read_text"));
+        assert_eq!(intrinsic_runtime_symbol("fs.write_text"), Some("gb_fs_write_text"));
+        assert_eq!(intrinsic_runtime_symbol("process.env"), Some("gb_env_get"));
+        assert_eq!(intrinsic_runtime_symbol("process.exit"), Some("gb_process_exit"));
     }
 }
