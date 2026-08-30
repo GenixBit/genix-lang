@@ -1,7 +1,5 @@
-use crate::ast::{
-    BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, Stmt, StmtKind, Type, UnaryOp,
-};
-use crate::diagnostics::{Diagnostic, Span};
+use crate::ast::{BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, Stmt, Type, UnaryOp};
+use crate::diagnostics::Diagnostic;
 use crate::lexer::{Token, TokenKind};
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
@@ -40,7 +38,6 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Function, Diagnostic> {
-        let start = self.peek().clone();
         self.expect_simple(TokenKind::Fn, "expected 'fn'")?;
         let name = self.expect_identifier("expected function name after 'fn'")?;
         self.expect_simple(TokenKind::LParen, "expected '(' after function name")?;
@@ -70,14 +67,11 @@ impl Parser {
             Type::Void
         };
         let body = self.parse_block()?;
-        let span = self.span_from(&start);
         Ok(Function {
             name,
             params,
             return_type,
             body,
-            source_name: self.source_name.clone(),
-            span,
         })
     }
 
@@ -145,50 +139,50 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Result<Stmt, Diagnostic> {
-        let start = self.peek().clone();
-        let kind = if self.matches(&TokenKind::Let) {
-            self.parse_binding(false)?
-        } else if self.matches(&TokenKind::Mut) {
-            self.parse_binding(true)?
-        } else if self.matches(&TokenKind::Return) {
-            self.parse_return()?
-        } else if self.matches(&TokenKind::If) {
-            self.parse_if()?
-        } else if self.matches(&TokenKind::While) {
-            self.parse_while()?
-        } else if self.matches(&TokenKind::Match) {
-            self.parse_match()?
-        } else if self.check(&TokenKind::LBrace) {
-            StmtKind::Block(self.parse_block()?)
-        } else if let TokenKind::Identifier(name) = self.peek().kind.clone() {
+        if self.matches(&TokenKind::Let) {
+            return self.parse_binding(false);
+        }
+        if self.matches(&TokenKind::Mut) {
+            return self.parse_binding(true);
+        }
+        if self.matches(&TokenKind::Return) {
+            return self.parse_return();
+        }
+        if self.matches(&TokenKind::If) {
+            return self.parse_if();
+        }
+        if self.matches(&TokenKind::While) {
+            return self.parse_while();
+        }
+        if self.matches(&TokenKind::Match) {
+            return self.parse_match();
+        }
+        if self.check(&TokenKind::LBrace) {
+            return Ok(Stmt::Block(self.parse_block()?));
+        }
+
+        if let TokenKind::Identifier(name) = self.peek().kind.clone() {
             if self.check_next(&TokenKind::Equal) {
                 self.advance();
                 self.advance();
                 let value = self.parse_expression()?;
                 self.consume_optional_semicolon();
-                StmtKind::Assign { name, value }
-            } else if name == "print" {
+                return Ok(Stmt::Assign { name, value });
+            }
+            if name == "print" {
                 self.advance();
                 self.expect_simple(TokenKind::LParen, "expected '(' after print")?;
                 let expr = self.parse_expression()?;
                 self.expect_simple(TokenKind::RParen, "expected ')' after print argument")?;
                 self.consume_optional_semicolon();
-                StmtKind::Print(expr)
-            } else {
-                self.parse_expression_statement()?
+                return Ok(Stmt::Print(expr));
             }
-        } else {
-            self.parse_expression_statement()?
-        };
+        }
 
-        Ok(Stmt::new(kind, self.span_from(&start)))
-    }
-
-    fn parse_expression_statement(&mut self) -> Result<StmtKind, Diagnostic> {
         let expr = self.parse_expression()?;
         self.consume_optional_semicolon();
         if matches!(expr, Expr::Call { .. } | Expr::Try(_)) {
-            Ok(StmtKind::Expr(expr))
+            Ok(Stmt::Expr(expr))
         } else {
             Err(
                 self.error_here("only function calls may be used as expression statements")
@@ -197,7 +191,7 @@ impl Parser {
         }
     }
 
-    fn parse_binding(&mut self, mutable: bool) -> Result<StmtKind, Diagnostic> {
+    fn parse_binding(&mut self, mutable: bool) -> Result<Stmt, Diagnostic> {
         let name = self.expect_identifier("expected variable name")?;
         let annotation = if self.matches(&TokenKind::Colon) {
             Some(self.parse_type()?)
@@ -207,7 +201,7 @@ impl Parser {
         self.expect_simple(TokenKind::Equal, "expected '=' after variable name")?;
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
-        Ok(StmtKind::Let {
+        Ok(Stmt::Let {
             name,
             value,
             mutable,
@@ -215,20 +209,20 @@ impl Parser {
         })
     }
 
-    fn parse_return(&mut self) -> Result<StmtKind, Diagnostic> {
+    fn parse_return(&mut self) -> Result<Stmt, Diagnostic> {
         if self.check(&TokenKind::Semicolon) {
             self.advance();
-            return Ok(StmtKind::Return(None));
+            return Ok(Stmt::Return(None));
         }
         if self.check(&TokenKind::RBrace) {
-            return Ok(StmtKind::Return(None));
+            return Ok(Stmt::Return(None));
         }
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
-        Ok(StmtKind::Return(Some(value)))
+        Ok(Stmt::Return(Some(value)))
     }
 
-    fn parse_if(&mut self) -> Result<StmtKind, Diagnostic> {
+    fn parse_if(&mut self) -> Result<Stmt, Diagnostic> {
         let condition = self.parse_expression()?;
         let then_branch = self.parse_block()?;
         let else_branch = if self.matches(&TokenKind::Else) {
@@ -236,20 +230,20 @@ impl Parser {
         } else {
             None
         };
-        Ok(StmtKind::If {
+        Ok(Stmt::If {
             condition,
             then_branch,
             else_branch,
         })
     }
 
-    fn parse_while(&mut self) -> Result<StmtKind, Diagnostic> {
+    fn parse_while(&mut self) -> Result<Stmt, Diagnostic> {
         let condition = self.parse_expression()?;
         let body = self.parse_block()?;
-        Ok(StmtKind::While { condition, body })
+        Ok(Stmt::While { condition, body })
     }
 
-    fn parse_match(&mut self) -> Result<StmtKind, Diagnostic> {
+    fn parse_match(&mut self) -> Result<Stmt, Diagnostic> {
         let value = self.parse_expression()?;
         self.expect_simple(TokenKind::LBrace, "expected '{' after match value")?;
         let mut arms = Vec::new();
@@ -267,7 +261,7 @@ impl Parser {
                     .with_help("add Some/None or Ok/Err match arms"),
             );
         }
-        Ok(StmtKind::Match { value, arms })
+        Ok(Stmt::Match { value, arms })
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, Diagnostic> {
@@ -602,16 +596,6 @@ impl Parser {
         }
     }
 
-    fn span_from(&self, start: &Token) -> Span {
-        let end = self.previous();
-        Span::between(
-            start.line,
-            start.column,
-            end.line,
-            end.column + end.width.saturating_sub(1),
-        )
-    }
-
     fn error_here(&self, message: impl Into<String>) -> Diagnostic {
         let token = self.peek();
         self.error_at(token, "E0100", message)
@@ -636,13 +620,6 @@ mod tests {
         assert_eq!(program.functions[0].name, "add");
         assert_eq!(program.functions[0].params.len(), 2);
         assert_eq!(program.functions[0].return_type, Type::Int);
-        assert!(program.functions[0].span.end_column >= program.functions[0].span.column);
-    }
-
-    #[test]
-    fn preserves_source_name() {
-        let program = parse_named(lex("fn main() {}").unwrap(), "src/main.gb").unwrap();
-        assert_eq!(program.functions[0].source_name, "src/main.gb");
     }
 
     #[test]
@@ -650,15 +627,15 @@ mod tests {
         let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn main() { let x: Result<string,string> = load(); match x { Ok(v) => { print(v); } Err(e) => { print(e); } } }";
         let program = parse(lex(source).unwrap()).unwrap();
         assert_eq!(program.functions[0].return_type, Type::ResultString);
-        assert!(matches!(program.functions[1].body[1].kind, StmtKind::Match { .. }));
+        assert!(matches!(program.functions[1].body[1], Stmt::Match { .. }));
     }
 
     #[test]
     fn parses_try_postfix() {
         let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn wrapper() -> Result<string,string> { let x: string = load()?; return Ok(x); } fn main() {}";
         let program = parse(lex(source).unwrap()).unwrap();
-        match &program.functions[1].body[0].kind {
-            StmtKind::Let { value: Expr::Try(_), .. } => {}
+        match &program.functions[1].body[0] {
+            Stmt::Let { value: Expr::Try(_), .. } => {}
             _ => panic!("expected try expression"),
         }
     }
