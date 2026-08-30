@@ -4,7 +4,7 @@
 
 > Status: **pre-alpha / v0.0.1**. Syntax, runtime behavior, and compiler interfaces may change.
 
-## Create, run, inspect, and compile a Genix project
+## Create, run, inspect, and compile
 
 ```bash
 gb new hello-genix
@@ -12,6 +12,12 @@ cd hello-genix
 gb run
 gb check
 gb ir
+```
+
+Native builds now use the separate **Genix Runtime** repository. Point the compiler at it:
+
+```bash
+export GENIX_RUNTIME=/path/to/genix-runtime
 gb build
 ./build/hello-genix
 ```
@@ -20,21 +26,9 @@ Release build:
 
 ```bash
 gb build --release
-./build/hello-genix
-```
-
-A project uses:
-
-```text
-hello-genix/
-├── genix.toml
-└── src/
-    └── main.gb
 ```
 
 ## Compiler architecture
-
-Genix now has a backend-neutral, **typed intermediate representation (Genix IR)** between the frontend and native code generation.
 
 ```text
 Genix project / .gb files
@@ -51,80 +45,69 @@ Static Type Checker
         ↓
 Typed Genix IR
         ↓
-Backend
-        ├── C11 backend (implemented)
-        ├── LLVM backend (planned)
-        └── WebAssembly backend (planned)
+C11 backend
         ↓
-Native / target output
+Generated application C
+        +
+Genix Runtime ABI
+        ↓
+cc / clang / gcc
+        ↓
+Native executable
 ```
 
-The IR resolves information that backends should not have to rediscover:
+The C backend consumes typed Genix IR, not the parser AST.
 
-- Function signatures
-- Variable types, including inferred types
-- Module-qualified function names
-- Expression result types
-- Explicit safe numeric widening casts such as `int → float`
-- Structured control flow
+## Genix Runtime integration
 
-This keeps language semantics in the frontend/IR layer and makes backends primarily responsible for target code generation.
+Native code now targets the public runtime header:
+
+```text
+genix-runtime/include/genix/runtime.h
+```
+
+and links the current portable implementation:
+
+```text
+genix-runtime/src/runtime.c
+```
+
+Runtime ABI v1 currently provides:
+
+- Program startup/shutdown
+- Tracked allocation
+- Runtime panic handling
+- String concatenation
+- String equality
+- Typed printing for `int`, `float`, `bool`, and `string`
+
+Generated code uses calls such as:
+
+```text
+gb_runtime_init()
+gb_string_concat(...)
+gb_string_equal(...)
+gb_print_string(...)
+gb_runtime_shutdown()
+```
+
+The compiler first checks the `GENIX_RUNTIME` environment variable. It can also discover a nearby `genix-runtime` directory in common sibling/current-directory layouts.
+
+If the runtime cannot be found, `gb build` fails with a clear setup error rather than silently embedding a private runtime copy.
 
 ## Inspect Genix IR
 
-Use:
-
 ```bash
 gb ir
-```
-
-or:
-
-```bash
 gb ir path/to/project
 gb ir examples/functions.gb
 ```
 
-For example, source such as:
+IR carries resolved types, module-qualified calls, inferred variable types, and explicit safe casts such as `int → float`, keeping backend code generation simpler and deterministic.
 
-```gb
-fn average(a: float, b: float) -> float {
-    return (a + b) / 2.0;
-}
+## Native build modes
 
-fn main() {
-    let result: float = average(10, 20);
-    print(result);
-}
-```
-
-is lowered to typed IR where the integer arguments are represented with explicit `cast<float>(...)` nodes before the backend sees them.
-
-## Native compilation
-
-`gb build` produces a real host-native executable from Genix IR.
-
-```text
-Typed Genix IR
-      ↓
-C11 code generator
-      ↓
-Generated C source
-      ↓
-cc / clang / gcc
-      ↓
-Native executable
-```
-
-Example output:
-
-```text
-build/
-├── hello-genix.c
-└── hello-genix
-```
-
-Debug build:
+Debug:
 
 ```bash
 gb build
@@ -132,7 +115,7 @@ gb build
 
 uses `-O0 -g`.
 
-Release build:
+Release:
 
 ```bash
 gb build --release
@@ -140,41 +123,7 @@ gb build --release
 
 uses `-O2`.
 
-The compiler checks the `CC` environment variable first, then tries `cc`, `clang`, and `gcc`.
-
-## Multi-file modules
-
-```text
-src/
-├── main.gb
-├── math.gb
-└── greeting.gb
-```
-
-`math.gb`:
-
-```gb
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-
-fn twice(value: int) -> int {
-    return add(value, value);
-}
-```
-
-`main.gb`:
-
-```gb
-import math;
-
-fn main() {
-    let answer: int = math.twice(21);
-    print(answer);
-}
-```
-
-Imported functions are represented internally with names such as `math.twice`, giving the IR and backends deterministic module-qualified symbols.
+The compiler checks `CC` first, then tries `cc`, `clang`, and `gcc`.
 
 ## Developer CLI
 
@@ -183,7 +132,7 @@ gb new <name>                  Create a new Genix project
 gb run [target]                Run through the interpreter
 gb check [target]              Check syntax, modules, and types
 gb ir [target]                 Print typed Genix IR
-gb build [project] [--release] Build a native executable from IR
+gb build [project] [--release] Build and link a native executable
 gb version                     Show the current version
 gb help                        Show help
 ```
@@ -196,47 +145,43 @@ Current support includes:
 - `genix.toml` projects
 - Typed Genix IR
 - Explicit IR numeric widening casts
-- `gb new`, `gb run`, `gb check`, `gb ir`, and `gb build`
-- Debug and release native builds
-- C11 native backend
-- Multi-file modules with `import module;`
-- Namespaced calls such as `math.add(...)`
+- Multi-file modules and namespaced calls
 - Multiple user-defined functions
 - Typed parameters and return values
-- `return`
-- Static types: `int`, `float`, `string`, `bool`
+- `int`, `float`, `string`, `bool`
 - Type inference and explicit annotations
-- Static function argument and return checking
-- Guaranteed-return checking
-- Safe `int` → `float` widening
+- Static argument/return checking
+- Safe `int → float` widening
 - Immutable `let` and mutable `mut`
 - Arithmetic, comparisons, and boolean logic
 - `if` / `else`
 - `while`
 - Lexical block scope
-- String concatenation
-- `print(...)`
-- `//` comments
-- Automated CI that inspects IR and executes generated native binaries
+- String concatenation/equality through the runtime
+- `print(...)` through the runtime ABI
+- Native debug and release builds
+- External `genix-runtime` integration
+- Automated cross-repository CI
 
 ## Native type mapping
 
-| Genix | C11 backend |
+| Genix | Runtime/native ABI |
 |---|---|
 | `int` | `int64_t` |
 | `float` | `double` |
 | `bool` | `bool` |
 | `string` | `const char*` |
-| void function | `void` |
+| void | `void` |
 
 ## Current limitations
 
 - Native builds currently target the host platform only.
-- A C compiler is required for the current native backend.
+- A C compiler is required by the bootstrap C11 backend.
+- `genix-runtime` must currently be available locally for native builds.
 - Cross-compilation and target triples are not implemented yet.
-- The string runtime is intentionally minimal; the full memory-safety model is still to be designed.
-- Nested imports inside imported modules are not supported yet.
-- Package/registry imports are not implemented yet.
+- Runtime string representation is temporary.
+- The final ownership/memory-safety model is not yet designed.
+- Nested imports and package/registry imports are not implemented yet.
 - LLVM and WebAssembly backends are not implemented yet.
 
 ## Repository architecture
@@ -254,31 +199,29 @@ src/
 └── main.rs
 ```
 
-The C backend consumes `ir::Program`, not the parser AST.
-
 ## Next compiler milestones
 
-With the IR boundary established, the next compiler work should focus on:
+With the runtime boundary established, the next priorities are:
 
+- Compiler/runtime ABI compatibility checking
+- Stable runtime discovery/installation
+- Source-span diagnostics
 - IR optimization passes
-- Target triples and explicit target selection
-- Cross-compilation architecture
-- Runtime integration through `genix-runtime`
-- Source-span diagnostics through AST → IR → backend
 - `gb test`
 - `gb fmt`
 - Standard-library integration
-- Package management and lockfiles
+- Target triples and cross-compilation
 - Memory-safety / ownership model
 - LLVM backend
 - WebAssembly backend
+- Package management and lockfiles
 - Concurrency / async
 - Language server and editor tooling
 
 ## Ecosystem
 
 - `genix-lang` — compiler and core language implementation
-- `genix-runtime` — runtime and system support
+- `genix-runtime` — runtime ABI and low-level system support
 - `genix-stdlib` — official standard library
 - `genix-docs` — specification and developer documentation
 - `genix-site` — official website and developer portal
@@ -293,21 +236,22 @@ With the IR boundary established, the next compiler work should focus on:
 | CLI | `gb` |
 | Compiler | `gbc` (planned standalone compiler identity) |
 | Intermediate representation | Genix IR |
+| Runtime ABI | Genix Runtime ABI |
 
 ## Development
 
-The compiler is implemented in **Rust**.
+The compiler is implemented in **Rust**. The current runtime is portable **C11**.
 
 ```bash
+export GENIX_RUNTIME=/path/to/genix-runtime
 cargo check
 cargo test
 cargo run -- ir examples/project
 cargo run -- build examples/project
 ./examples/project/build/module-demo
-cargo run -- build examples/project --release
 ```
 
-GitHub Actions validates the compiler frontend, interpreter, module system, typed IR, IR numeric casts, native debug builds, native release builds, and execution of generated binaries.
+GitHub Actions checks out both `genix-lang` and `genix-runtime`, tests each layer, verifies generated code targets the runtime ABI, and executes debug/release native binaries.
 
 ## Project status
 
