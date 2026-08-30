@@ -138,7 +138,8 @@ fn build_target(args: Vec<String>) -> Result<(), String> {
         "✓ native {profile} build completed for '{}'",
         loaded.config.name
     );
-    println!("  pipeline: AST -> typed Genix IR -> C11 -> native executable");
+    println!("  pipeline: AST -> typed Genix IR -> C11 -> Genix Runtime -> native executable");
+    println!("  runtime: {}", artifact.runtime_root.display());
     println!("  compiler: {}", artifact.compiler);
     println!("  C source: {}", artifact.source.display());
     println!("  executable: {}", artifact.executable.display());
@@ -187,6 +188,11 @@ fn print_help() {
     println!();
     println!("Native build requirements:");
     println!("  cc, clang, or gcc on PATH (or set CC)");
+    println!("  Genix Runtime available through GENIX_RUNTIME or a discoverable genix-runtime directory");
+    println!();
+    println!("Example:");
+    println!("  export GENIX_RUNTIME=/path/to/genix-runtime");
+    println!("  gb build --release");
     println!();
     println!("Project layout:");
     println!("  genix.toml");
