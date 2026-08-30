@@ -38,6 +38,50 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Verify professional diagnostics
+        run: |
+          cat > /tmp/genix-type-error.gb <<'GB'
+          fn main() {
+              let age: int = "twenty";
+          }
+          GB
+          set +e
+          type_output=$(cargo run --quiet -- check /tmp/genix-type-error.gb 2>&1)
+          type_status=$?
+          set -e
+          test $type_status -ne 0
+          echo "$type_output"
+          echo "$type_output" | grep 'error\[E0201\]'
+          echo "$type_output" | grep '/tmp/genix-type-error.gb:2:'
+          echo "$type_output" | grep '\^'
+          echo "$type_output" | grep 'help:'
+
+          cat > /tmp/genix-syntax-error.gb <<'GB'
+          fn main( {
+          GB
+          set +e
+          syntax_output=$(cargo run --quiet -- check /tmp/genix-syntax-error.gb 2>&1)
+          syntax_status=$?
+          set -e
+          test $syntax_status -ne 0
+          echo "$syntax_output"
+          echo "$syntax_output" | grep 'error\[E0100\]'
+          echo "$syntax_output" | grep '/tmp/genix-syntax-error.gb:1:'
+          echo "$syntax_output" | grep '\^'
+
+          cat > /tmp/genix-lexer-error.gb <<'GB'
+          fn main() { @ }
+          GB
+          set +e
+          lexer_output=$(cargo run --quiet -- check /tmp/genix-lexer-error.gb 2>&1)
+          lexer_status=$?
+          set -e
+          test $lexer_status -ne 0
+          echo "$lexer_output"
+          echo "$lexer_output" | grep 'error\[E0001\]'
+          echo "$lexer_output" | grep '/tmp/genix-lexer-error.gb:1:'
+          echo "$lexer_output" | grep '\^'
+
       - name: Test runtime independently
         run: make -C genix-runtime test
 
