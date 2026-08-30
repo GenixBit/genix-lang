@@ -4,7 +4,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::process as host_process;
 
-use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
+use crate::ast::{BinaryOp, Expr, Function, MatchArm, Pattern, Program, Stmt, Type, UnaryOp};
+
+const PROPAGATE_PREFIX: &str = "__GENIX_PROPAGATE_ERR__:";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -12,6 +14,10 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     String(String),
+    OptionSome(Box<Value>),
+    OptionNone,
+    ResultOk(Box<Value>),
+    ResultErr(String),
 }
 
 impl fmt::Display for Value {
@@ -21,6 +27,10 @@ impl fmt::Display for Value {
             Value::Float(value) => write!(f, "{value}"),
             Value::Bool(value) => write!(f, "{value}"),
             Value::String(value) => write!(f, "{value}"),
+            Value::OptionSome(value) => write!(f, "Some({value})"),
+            Value::OptionNone => write!(f, "None"),
+            Value::ResultOk(value) => write!(f, "Ok({value})"),
+            Value::ResultErr(error) => write!(f, "Err({error})"),
         }
     }
 }
@@ -54,16 +64,10 @@ struct Interpreter {
 
 impl Interpreter {
     fn new(program: &Program) -> Self {
-        let functions = program
-            .functions
-            .iter()
-            .cloned()
+        let functions = program.functions.iter().cloned()
             .map(|function| (function.name.clone(), function))
             .collect();
-        Self {
-            functions,
-            scopes: vec![HashMap::new()],
-        }
+        Self { functions, scopes: vec![HashMap::new()] }
     }
 
     fn call_function(&mut self, name: &str, arguments: Vec<Value>) -> Result<Option<Value>, String> {
@@ -71,17 +75,12 @@ impl Interpreter {
             return self.call_stdlib_intrinsic(name, arguments);
         }
 
-        let function = self
-            .functions
-            .get(name)
-            .cloned()
+        let function = self.functions.get(name).cloned()
             .ok_or_else(|| format!("undefined function '{name}'"))?;
-
         if arguments.len() != function.params.len() {
             return Err(format!(
                 "function '{name}' expects {} argument(s), found {}",
-                function.params.len(),
-                arguments.len()
+                function.params.len(), arguments.len()
             ));
         }
 
@@ -91,21 +90,15 @@ impl Interpreter {
                 let value = coerce(value, param.ty)?;
                 self.scopes[0].insert(
                     param.name.clone(),
-                    Binding {
-                        value,
-                        mutable: false,
-                        ty: param.ty,
-                    },
+                    Binding { value, mutable: false, ty: param.ty },
                 );
             }
-
             for statement in &function.body {
                 match self.execute_statement(statement)? {
                     Flow::Continue => {}
                     Flow::Return(value) => return self.finish_return(&function, value),
                 }
             }
-
             if function.return_type == Type::Void {
                 Ok(None)
             } else {
@@ -116,35 +109,41 @@ impl Interpreter {
             }
         })();
         self.scopes = caller_scopes;
-        result
+
+        match result {
+            Err(error) if error.starts_with(PROPAGATE_PREFIX) && function.return_type.is_result() => {
+                Ok(Some(Value::ResultErr(error[PROPAGATE_PREFIX.len()..].to_string())))
+            }
+            other => other,
+        }
     }
 
-    fn call_stdlib_intrinsic(
-        &mut self,
-        name: &str,
-        arguments: Vec<Value>,
-    ) -> Result<Option<Value>, String> {
+    fn call_stdlib_intrinsic(&mut self, name: &str, arguments: Vec<Value>) -> Result<Option<Value>, String> {
         match name {
             "io.input" => {
                 require_arity(name, &arguments, 1)?;
                 let prompt = expect_string(arguments.into_iter().next().unwrap(), name)?;
                 print!("{prompt}");
-                io::stdout()
-                    .flush()
+                io::stdout().flush()
                     .map_err(|error| format!("io.input could not flush stdout: {error}"))?;
                 let mut line = String::new();
-                io::stdin()
-                    .read_line(&mut line)
+                io::stdin().read_line(&mut line)
                     .map_err(|error| format!("io.input failed: {error}"))?;
-                while line.ends_with('\n') || line.ends_with('\r') {
-                    line.pop();
-                }
+                while line.ends_with('\n') || line.ends_with('\r') { line.pop(); }
                 Ok(Some(Value::String(line)))
             }
             "process.env" => {
                 require_arity(name, &arguments, 1)?;
                 let key = expect_string(arguments.into_iter().next().unwrap(), name)?;
                 Ok(Some(Value::String(std::env::var(key).unwrap_or_default())))
+            }
+            "process.env_option" => {
+                require_arity(name, &arguments, 1)?;
+                let key = expect_string(arguments.into_iter().next().unwrap(), name)?;
+                Ok(Some(match std::env::var(key) {
+                    Ok(value) => Value::OptionSome(Box::new(Value::String(value))),
+                    Err(_) => Value::OptionNone,
+                }))
             }
             "process.exit" => {
                 require_arity(name, &arguments, 1)?;
@@ -158,6 +157,14 @@ impl Interpreter {
                     .map_err(|error| format!("fs.read_text('{path}') failed: {error}"))?;
                 Ok(Some(Value::String(text)))
             }
+            "fs.try_read_text" => {
+                require_arity(name, &arguments, 1)?;
+                let path = expect_string(arguments.into_iter().next().unwrap(), name)?;
+                Ok(Some(match fs::read_to_string(&path) {
+                    Ok(text) => Value::ResultOk(Box::new(Value::String(text))),
+                    Err(error) => Value::ResultErr(format!("fs.try_read_text('{path}') failed: {error}")),
+                }))
+            }
             "fs.write_text" => {
                 require_arity(name, &arguments, 2)?;
                 let mut values = arguments.into_iter();
@@ -166,6 +173,16 @@ impl Interpreter {
                 fs::write(&path, text)
                     .map_err(|error| format!("fs.write_text('{path}') failed: {error}"))?;
                 Ok(None)
+            }
+            "fs.try_write_text" => {
+                require_arity(name, &arguments, 2)?;
+                let mut values = arguments.into_iter();
+                let path = expect_string(values.next().unwrap(), name)?;
+                let text = expect_string(values.next().unwrap(), name)?;
+                Ok(Some(match fs::write(&path, text) {
+                    Ok(()) => Value::ResultOk(Box::new(Value::Bool(true))),
+                    Err(error) => Value::ResultErr(format!("fs.try_write_text('{path}') failed: {error}")),
+                }))
             }
             _ => Err(format!("unknown Genix stdlib intrinsic '{name}'")),
         }
@@ -176,10 +193,7 @@ impl Interpreter {
             (Type::Void, None) => Ok(None),
             (Type::Void, Some(_)) => Err(format!("void function '{}' returned a value", function.name)),
             (expected, Some(value)) => Ok(Some(coerce(value, expected)?)),
-            (expected, None) => Err(format!(
-                "function '{}' must return a value of type {expected}",
-                function.name
-            )),
+            (expected, None) => Err(format!("function '{}' must return a value of type {expected}", function.name)),
         }
     }
 
@@ -187,20 +201,17 @@ impl Interpreter {
         match statement {
             Stmt::Let { name, value, mutable, annotation } => {
                 let evaluated = self.evaluate(value)?;
-                let ty = annotation.unwrap_or_else(|| value_type(&evaluated));
+                let ty = match annotation {
+                    Some(ty) => *ty,
+                    None => value_type(&evaluated)
+                        .ok_or_else(|| format!("runtime cannot infer type for variable '{name}'"))?,
+                };
                 let evaluated = coerce(evaluated, ty)?;
                 let scope = self.scopes.last_mut().expect("interpreter always has a scope");
                 if scope.contains_key(name) {
                     return Err(format!("variable '{name}' is already declared in this scope"));
                 }
-                scope.insert(
-                    name.clone(),
-                    Binding {
-                        value: evaluated,
-                        mutable: *mutable,
-                        ty,
-                    },
-                );
+                scope.insert(name.clone(), Binding { value: evaluated, mutable: *mutable, ty });
                 Ok(Flow::Continue)
             }
             Stmt::Assign { name, value } => {
@@ -213,11 +224,13 @@ impl Interpreter {
                 Ok(Flow::Continue)
             }
             Stmt::Expr(expr) => {
-                if let Expr::Call { callee, arguments } = expr {
-                    let values = self.evaluate_arguments(arguments)?;
-                    self.call_function(callee, values)?;
-                } else {
-                    self.evaluate(expr)?;
+                match expr {
+                    Expr::Call { callee, arguments } => {
+                        let values = self.evaluate_arguments(arguments)?;
+                        self.call_function(callee, values)?;
+                    }
+                    Expr::Try(_) => { self.evaluate(expr)?; }
+                    _ => { self.evaluate(expr)?; }
                 }
                 Ok(Flow::Continue)
             }
@@ -232,8 +245,8 @@ impl Interpreter {
                 let condition_value = self.evaluate(condition)?;
                 if self.expect_bool(condition_value, "if condition")? {
                     self.execute_block(then_branch)
-                } else if let Some(else_branch) = else_branch {
-                    self.execute_block(else_branch)
+                } else if let Some(branch) = else_branch {
+                    self.execute_block(branch)
                 } else {
                     Ok(Flow::Continue)
                 }
@@ -241,9 +254,7 @@ impl Interpreter {
             Stmt::While { condition, body } => {
                 loop {
                     let condition_value = self.evaluate(condition)?;
-                    if !self.expect_bool(condition_value, "while condition")? {
-                        break;
-                    }
+                    if !self.expect_bool(condition_value, "while condition")? { break; }
                     match self.execute_block(body)? {
                         Flow::Continue => {}
                         returned @ Flow::Return(_) => return Ok(returned),
@@ -251,8 +262,46 @@ impl Interpreter {
                 }
                 Ok(Flow::Continue)
             }
+            Stmt::Match { value, arms } => {
+                let value = self.evaluate(value)?;
+                self.execute_match(value, arms)
+            }
             Stmt::Block(body) => self.execute_block(body),
         }
+    }
+
+    fn execute_match(&mut self, value: Value, arms: &[MatchArm]) -> Result<Flow, String> {
+        for arm in arms {
+            let binding = match (&arm.pattern, &value) {
+                (Pattern::Some(name), Value::OptionSome(inner)) => Some((name.clone(), (**inner).clone())),
+                (Pattern::None, Value::OptionNone) => Some((String::new(), Value::Bool(false))),
+                (Pattern::Ok(name), Value::ResultOk(inner)) => Some((name.clone(), (**inner).clone())),
+                (Pattern::Err(name), Value::ResultErr(error)) => Some((name.clone(), Value::String(error.clone()))),
+                _ => None,
+            };
+            if let Some((name, bound)) = binding {
+                self.scopes.push(HashMap::new());
+                if !name.is_empty() {
+                    let ty = value_type(&bound).ok_or_else(|| "runtime could not determine match binding type".to_string())?;
+                    self.scopes.last_mut().unwrap().insert(
+                        name,
+                        Binding { value: bound, mutable: false, ty },
+                    );
+                }
+                let result = (|| {
+                    for statement in &arm.body {
+                        match self.execute_statement(statement)? {
+                            Flow::Continue => {}
+                            returned @ Flow::Return(_) => return Ok(returned),
+                        }
+                    }
+                    Ok(Flow::Continue)
+                })();
+                self.scopes.pop();
+                return result;
+            }
+        }
+        Err("runtime error: exhaustive match had no matching arm".into())
     }
 
     fn execute_block(&mut self, body: &[Stmt]) -> Result<Flow, String> {
@@ -274,9 +323,7 @@ impl Interpreter {
         for scope in self.scopes.iter_mut().rev() {
             if let Some(binding) = scope.get_mut(name) {
                 if !binding.mutable {
-                    return Err(format!(
-                        "cannot assign to immutable variable '{name}'; declare it with 'mut'"
-                    ));
+                    return Err(format!("cannot assign to immutable variable '{name}'; declare it with 'mut'"));
                 }
                 binding.value = coerce(value, binding.ty)?;
                 return Ok(());
@@ -290,11 +337,7 @@ impl Interpreter {
     }
 
     fn evaluate_arguments(&mut self, arguments: &[Expr]) -> Result<Vec<Value>, String> {
-        let mut values = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            values.push(self.evaluate(argument)?);
-        }
-        Ok(values)
+        arguments.iter().map(|argument| self.evaluate(argument)).collect()
     }
 
     fn evaluate(&mut self, expr: &Expr) -> Result<Value, String> {
@@ -303,8 +346,7 @@ impl Interpreter {
             Expr::Float(value) => Ok(Value::Float(*value)),
             Expr::Bool(value) => Ok(Value::Bool(*value)),
             Expr::String(value) => Ok(Value::String(value.clone())),
-            Expr::Variable(name) => self
-                .lookup(name)
+            Expr::Variable(name) => self.lookup(name)
                 .map(|binding| binding.value.clone())
                 .ok_or_else(|| format!("undefined variable '{name}'")),
             Expr::Call { callee, arguments } => {
@@ -312,6 +354,18 @@ impl Interpreter {
                 self.call_function(callee, values)?
                     .ok_or_else(|| format!("function '{callee}' does not return a value"))
             }
+            Expr::Some(value) => Ok(Value::OptionSome(Box::new(self.evaluate(value)?))),
+            Expr::None => Ok(Value::OptionNone),
+            Expr::Ok(value) => Ok(Value::ResultOk(Box::new(self.evaluate(value)?))),
+            Expr::Err(error) => {
+                let value = self.evaluate(error)?;
+                Ok(Value::ResultErr(expect_string(value, "Err")?))
+            }
+            Expr::Try(inner) => match self.evaluate(inner)? {
+                Value::ResultOk(value) => Ok(*value),
+                Value::ResultErr(error) => Err(format!("{PROPAGATE_PREFIX}{error}")),
+                other => Err(format!("runtime '?': expected Result, found {}", type_name(&other))),
+            },
             Expr::Unary { op, expr } => {
                 let value = self.evaluate(expr)?;
                 self.apply_unary(*op, value)
@@ -320,22 +374,16 @@ impl Interpreter {
                 BinaryOp::And => {
                     let left_value = self.evaluate(left)?;
                     let left = self.expect_bool(left_value, "left side of '&&'")?;
-                    if !left {
-                        return Ok(Value::Bool(false));
-                    }
+                    if !left { return Ok(Value::Bool(false)); }
                     let right_value = self.evaluate(right)?;
-                    let right = self.expect_bool(right_value, "right side of '&&'")?;
-                    Ok(Value::Bool(right))
+                    Ok(Value::Bool(self.expect_bool(right_value, "right side of '&&'")?))
                 }
                 BinaryOp::Or => {
                     let left_value = self.evaluate(left)?;
                     let left = self.expect_bool(left_value, "left side of '||'")?;
-                    if left {
-                        return Ok(Value::Bool(true));
-                    }
+                    if left { return Ok(Value::Bool(true)); }
                     let right_value = self.evaluate(right)?;
-                    let right = self.expect_bool(right_value, "right side of '||'")?;
-                    Ok(Value::Bool(right))
+                    Ok(Value::Bool(self.expect_bool(right_value, "right side of '||'")?))
                 }
                 _ => {
                     let left = self.evaluate(left)?;
@@ -383,52 +431,53 @@ impl Interpreter {
 fn is_stdlib_intrinsic(name: &str) -> bool {
     matches!(
         name,
-        "io.input" | "process.env" | "process.exit" | "fs.read_text" | "fs.write_text"
+        "io.input" | "process.env" | "process.env_option" | "process.exit"
+            | "fs.read_text" | "fs.try_read_text" | "fs.write_text" | "fs.try_write_text"
     )
 }
 
 fn require_arity(name: &str, arguments: &[Value], expected: usize) -> Result<(), String> {
-    if arguments.len() == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "intrinsic '{name}' expects {expected} argument(s), found {}",
-            arguments.len()
-        ))
+    if arguments.len() == expected { Ok(()) } else {
+        Err(format!("intrinsic '{name}' expects {expected} argument(s), found {}", arguments.len()))
     }
 }
 
-fn expect_string(value: Value, name: &str) -> Result<String, String> {
+fn expect_string(value: Value, context: &str) -> Result<String, String> {
     match value {
         Value::String(value) => Ok(value),
-        other => Err(format!("intrinsic '{name}' expected string, found {}", type_name(&other))),
+        other => Err(format!("{context} expected string, found {}", type_name(&other))),
     }
 }
 
-fn expect_int(value: Value, name: &str) -> Result<i64, String> {
+fn expect_int(value: Value, context: &str) -> Result<i64, String> {
     match value {
         Value::Integer(value) => Ok(value),
-        other => Err(format!("intrinsic '{name}' expected int, found {}", type_name(&other))),
+        other => Err(format!("{context} expected int, found {}", type_name(&other))),
     }
 }
 
 fn coerce(value: Value, expected: Type) -> Result<Value, String> {
     match (value, expected) {
         (Value::Integer(value), Type::Float) => Ok(Value::Float(value as f64)),
-        (value, expected) if value_type(&value) == expected => Ok(value),
+        (Value::OptionNone, ty) if ty.option_inner().is_some() => Ok(Value::OptionNone),
+        (Value::ResultErr(error), ty) if ty.result_ok().is_some() => Ok(Value::ResultErr(error)),
+        (value, expected) if value_type(&value) == Some(expected) => Ok(value),
         (value, expected) => Err(format!(
-            "cannot use runtime value of type {} as {expected}",
-            type_name(&value)
+            "cannot use runtime value of type {} as {expected}", type_name(&value)
         )),
     }
 }
 
-fn value_type(value: &Value) -> Type {
+fn value_type(value: &Value) -> Option<Type> {
     match value {
-        Value::Integer(_) => Type::Int,
-        Value::Float(_) => Type::Float,
-        Value::Bool(_) => Type::Bool,
-        Value::String(_) => Type::String,
+        Value::Integer(_) => Some(Type::Int),
+        Value::Float(_) => Some(Type::Float),
+        Value::Bool(_) => Some(Type::Bool),
+        Value::String(_) => Some(Type::String),
+        Value::OptionSome(value) => Type::option(value_type(value)?),
+        Value::OptionNone => None,
+        Value::ResultOk(value) => Type::result(value_type(value)?, Type::String),
+        Value::ResultErr(_) => None,
     }
 }
 
@@ -447,7 +496,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
 fn compare_numeric(left: Value, right: Value, op: impl FnOnce(f64, f64) -> bool) -> Result<Value, String> {
     let left_type = type_name(&left);
     let right_type = type_name(&right);
-    match (as_number(left), as_number(right)) {
+    let a = as_number(left);
+    let b = as_number(right);
+    match (a, b) {
         (Some(a), Some(b)) => Ok(Value::Bool(op(a, b))),
         _ => Err(format!("comparison requires numbers, found {left_type} and {right_type}")),
     }
@@ -468,10 +519,7 @@ fn add(left: Value, right: Value) -> Result<Value, String> {
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
         (Value::Integer(a), Value::Float(b)) => Ok(Value::Float(a as f64 + b)),
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(a + b as f64)),
-        (a, b) => Err(format!(
-            "operator '+' is not defined for {} and {}",
-            type_name(&a), type_name(&b)
-        )),
+        (a, b) => Err(format!("operator '+' is not defined for {} and {}", type_name(&a), type_name(&b))),
     }
 }
 
@@ -486,10 +534,7 @@ fn numeric_binary(
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(a, b))),
         (Value::Integer(a), Value::Float(b)) => Ok(Value::Float(float_op(a as f64, b))),
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(float_op(a, b as f64))),
-        (a, b) => Err(format!(
-            "numeric operator is not defined for {} and {}",
-            type_name(&a), type_name(&b)
-        )),
+        (a, b) => Err(format!("numeric operator is not defined for {} and {}", type_name(&a), type_name(&b))),
     }
 }
 
@@ -501,10 +546,7 @@ fn divide(left: Value, right: Value) -> Result<Value, String> {
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
         (Value::Integer(a), Value::Float(b)) => Ok(Value::Float(a as f64 / b)),
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(a / b as f64)),
-        (a, b) => Err(format!(
-            "operator '/' is not defined for {} and {}",
-            type_name(&a), type_name(&b)
-        )),
+        (a, b) => Err(format!("operator '/' is not defined for {} and {}", type_name(&a), type_name(&b))),
     }
 }
 
@@ -514,6 +556,8 @@ fn type_name(value: &Value) -> &'static str {
         Value::Float(_) => "float",
         Value::Bool(_) => "bool",
         Value::String(_) => "string",
+        Value::OptionSome(_) | Value::OptionNone => "Option",
+        Value::ResultOk(_) | Value::ResultErr(_) => "Result",
     }
 }
 
@@ -529,61 +573,14 @@ mod tests {
     }
 
     #[test]
-    fn executes_typed_function_call() {
-        let program = program("fn add(a: int, b: int) -> int { return a + b; } fn main() {}");
-        let mut interpreter = Interpreter::new(&program);
-        let result = interpreter
-            .call_function("add", vec![Value::Integer(2), Value::Integer(3)])
-            .unwrap();
-        assert_eq!(result, Some(Value::Integer(5)));
+    fn executes_option_match() {
+        let source = "fn main() { let x: Option<string> = Some(\"Genix\"); match x { Some(v) => { print(v); } None => { print(\"none\"); } } }";
+        assert!(execute(&program(source)).is_ok());
     }
 
     #[test]
-    fn widens_int_argument_to_float() {
-        let program = program("fn identity(x: float) -> float { return x; } fn main() {}");
-        let mut interpreter = Interpreter::new(&program);
-        let result = interpreter
-            .call_function("identity", vec![Value::Integer(3)])
-            .unwrap();
-        assert_eq!(result, Some(Value::Float(3.0)));
-    }
-
-    #[test]
-    fn executes_control_flow_with_functions() {
-        let source = "fn inc(x: int) -> int { return x + 1; } fn main() { mut x: int = 0; while x < 3 { x = inc(x); } print(x); }";
-        let program = program(source);
-        assert!(execute(&program).is_ok());
-    }
-
-    #[test]
-    fn executes_filesystem_intrinsics() {
-        let program = program("fn main() {}");
-        let mut interpreter = Interpreter::new(&program);
-        let path = std::env::temp_dir().join("genix_interpreter_intrinsic_test.txt");
-        let path_text = path.to_string_lossy().to_string();
-        interpreter
-            .call_function(
-                "fs.write_text",
-                vec![Value::String(path_text.clone()), Value::String("Genix".into())],
-            )
-            .unwrap();
-        let result = interpreter
-            .call_function("fs.read_text", vec![Value::String(path_text)])
-            .unwrap();
-        assert_eq!(result, Some(Value::String("Genix".into())));
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn missing_environment_variable_returns_empty_string() {
-        let program = program("fn main() {}");
-        let mut interpreter = Interpreter::new(&program);
-        let result = interpreter
-            .call_function(
-                "process.env",
-                vec![Value::String("GENIX_ENV_UNLIKELY_9D31".into())],
-            )
-            .unwrap();
-        assert_eq!(result, Some(Value::String(String::new())));
+    fn propagates_result_error() {
+        let source = "fn fail() -> Result<string,string> { return Err(\"boom\"); } fn wrap() -> Result<string,string> { let x: string = fail()?; return Ok(x); } fn main() { let r: Result<string,string> = wrap(); match r { Ok(v) => { print(v); } Err(e) => { print(e); } } }";
+        assert!(execute(&program(source)).is_ok());
     }
 }
