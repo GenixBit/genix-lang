@@ -1,0 +1,15 @@
+import io;
+import fs;
+import process;
+
+fn main() {
+    let name: string = io.input("Name: ");
+    let message: string = "Hello " + name;
+
+    fs.write_text("intrinsic-demo.txt", message);
+    let loaded: string = fs.read_text("intrinsic-demo.txt");
+    io.println(loaded);
+
+    let marker: string = process.env("GENIX_INTRINSIC_TEST");
+    io.println(marker);
+}
