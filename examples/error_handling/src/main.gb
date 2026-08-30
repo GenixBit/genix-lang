@@ -1,0 +1,32 @@
+import fs;
+import process;
+
+fn save_and_load(path: string) -> Result<string,string> {
+    let written: bool = fs.try_write_text(path, "Genix safe IO")?;
+    let text: string = fs.try_read_text(path)?;
+    return Ok(text);
+}
+
+fn main() {
+    let missing: Option<string> = process.env_option("GENIX_CI_MISSING_VALUE");
+
+    match missing {
+        Some(value) => {
+            print(value);
+        }
+        None => {
+            print("missing-env-ok");
+        }
+    }
+
+    let result: Result<string,string> = save_and_load("genix-safe-io.txt");
+
+    match result {
+        Ok(text) => {
+            print(text);
+        }
+        Err(error) => {
+            print(error);
+        }
+    }
+}
