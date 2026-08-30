@@ -1,0 +1,20 @@
+import io;
+import math;
+import string;
+
+fn main() {
+    io.println("Genix standard library");
+
+    let distance: int = math.abs_int(-42);
+    io.print_int(distance);
+
+    let bounded: int = math.clamp_int(120, 0, 100);
+    io.print_int(bounded);
+
+    let squared: float = math.square(12.0);
+    io.print_float(squared);
+
+    let message: string = string.concat("Hello ", "Genix");
+    io.println(message);
+    io.print_bool(string.equals(message, "Hello Genix"));
+}
