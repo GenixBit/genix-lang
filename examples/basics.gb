@@ -1,0 +1,13 @@
+fn main() {
+    let company = "GenixBit";
+    let language = "Genix";
+    let answer = 2 + 3 * 4;
+    let version = 0.1;
+    let ready = true;
+
+    print("Hello from " + language);
+    print(company);
+    print(answer);
+    print(version);
+    print(ready);
+}
