@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::fs;
+use std::io::{self, Write};
+use std::process as host_process;
 
 use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
 
@@ -57,7 +60,6 @@ impl Interpreter {
             .cloned()
             .map(|function| (function.name.clone(), function))
             .collect();
-
         Self {
             functions,
             scopes: vec![HashMap::new()],
@@ -65,6 +67,10 @@ impl Interpreter {
     }
 
     fn call_function(&mut self, name: &str, arguments: Vec<Value>) -> Result<Option<Value>, String> {
+        if is_stdlib_intrinsic(name) {
+            return self.call_stdlib_intrinsic(name, arguments);
+        }
+
         let function = self
             .functions
             .get(name)
@@ -96,9 +102,7 @@ impl Interpreter {
             for statement in &function.body {
                 match self.execute_statement(statement)? {
                     Flow::Continue => {}
-                    Flow::Return(value) => {
-                        return self.finish_return(&function, value);
-                    }
+                    Flow::Return(value) => return self.finish_return(&function, value),
                 }
             }
 
@@ -115,6 +119,58 @@ impl Interpreter {
         result
     }
 
+    fn call_stdlib_intrinsic(
+        &mut self,
+        name: &str,
+        arguments: Vec<Value>,
+    ) -> Result<Option<Value>, String> {
+        match name {
+            "io.input" => {
+                require_arity(name, &arguments, 1)?;
+                let prompt = expect_string(arguments.into_iter().next().unwrap(), name)?;
+                print!("{prompt}");
+                io::stdout()
+                    .flush()
+                    .map_err(|error| format!("io.input could not flush stdout: {error}"))?;
+                let mut line = String::new();
+                io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|error| format!("io.input failed: {error}"))?;
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                Ok(Some(Value::String(line)))
+            }
+            "process.env" => {
+                require_arity(name, &arguments, 1)?;
+                let key = expect_string(arguments.into_iter().next().unwrap(), name)?;
+                Ok(Some(Value::String(std::env::var(key).unwrap_or_default())))
+            }
+            "process.exit" => {
+                require_arity(name, &arguments, 1)?;
+                let code = expect_int(arguments.into_iter().next().unwrap(), name)?;
+                host_process::exit(code as i32)
+            }
+            "fs.read_text" => {
+                require_arity(name, &arguments, 1)?;
+                let path = expect_string(arguments.into_iter().next().unwrap(), name)?;
+                let text = fs::read_to_string(&path)
+                    .map_err(|error| format!("fs.read_text('{path}') failed: {error}"))?;
+                Ok(Some(Value::String(text)))
+            }
+            "fs.write_text" => {
+                require_arity(name, &arguments, 2)?;
+                let mut values = arguments.into_iter();
+                let path = expect_string(values.next().unwrap(), name)?;
+                let text = expect_string(values.next().unwrap(), name)?;
+                fs::write(&path, text)
+                    .map_err(|error| format!("fs.write_text('{path}') failed: {error}"))?;
+                Ok(None)
+            }
+            _ => Err(format!("unknown Genix stdlib intrinsic '{name}'")),
+        }
+    }
+
     fn finish_return(&self, function: &Function, value: Option<Value>) -> Result<Option<Value>, String> {
         match (function.return_type, value) {
             (Type::Void, None) => Ok(None),
@@ -129,12 +185,7 @@ impl Interpreter {
 
     fn execute_statement(&mut self, statement: &Stmt) -> Result<Flow, String> {
         match statement {
-            Stmt::Let {
-                name,
-                value,
-                mutable,
-                annotation,
-            } => {
+            Stmt::Let { name, value, mutable, annotation } => {
                 let evaluated = self.evaluate(value)?;
                 let ty = annotation.unwrap_or_else(|| value_type(&evaluated));
                 let evaluated = coerce(evaluated, ty)?;
@@ -162,14 +213,11 @@ impl Interpreter {
                 Ok(Flow::Continue)
             }
             Stmt::Expr(expr) => {
-                match expr {
-                    Expr::Call { callee, arguments } => {
-                        let values = self.evaluate_arguments(arguments)?;
-                        self.call_function(callee, values)?;
-                    }
-                    _ => {
-                        self.evaluate(expr)?;
-                    }
+                if let Expr::Call { callee, arguments } = expr {
+                    let values = self.evaluate_arguments(arguments)?;
+                    self.call_function(callee, values)?;
+                } else {
+                    self.evaluate(expr)?;
                 }
                 Ok(Flow::Continue)
             }
@@ -180,11 +228,7 @@ impl Interpreter {
                 };
                 Ok(Flow::Return(value))
             }
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
+            Stmt::If { condition, then_branch, else_branch } => {
                 let condition_value = self.evaluate(condition)?;
                 if self.expect_bool(condition_value, "if condition")? {
                     self.execute_block(then_branch)
@@ -336,6 +380,38 @@ impl Interpreter {
     }
 }
 
+fn is_stdlib_intrinsic(name: &str) -> bool {
+    matches!(
+        name,
+        "io.input" | "process.env" | "process.exit" | "fs.read_text" | "fs.write_text"
+    )
+}
+
+fn require_arity(name: &str, arguments: &[Value], expected: usize) -> Result<(), String> {
+    if arguments.len() == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "intrinsic '{name}' expects {expected} argument(s), found {}",
+            arguments.len()
+        ))
+    }
+}
+
+fn expect_string(value: Value, name: &str) -> Result<String, String> {
+    match value {
+        Value::String(value) => Ok(value),
+        other => Err(format!("intrinsic '{name}' expected string, found {}", type_name(&other))),
+    }
+}
+
+fn expect_int(value: Value, name: &str) -> Result<i64, String> {
+    match value {
+        Value::Integer(value) => Ok(value),
+        other => Err(format!("intrinsic '{name}' expected int, found {}", type_name(&other))),
+    }
+}
+
 fn coerce(value: Value, expected: Type) -> Result<Value, String> {
     match (value, expected) {
         (Value::Integer(value), Type::Float) => Ok(Value::Float(value as f64)),
@@ -371,9 +447,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
 fn compare_numeric(left: Value, right: Value, op: impl FnOnce(f64, f64) -> bool) -> Result<Value, String> {
     let left_type = type_name(&left);
     let right_type = type_name(&right);
-    let a = as_number(left);
-    let b = as_number(right);
-    match (a, b) {
+    match (as_number(left), as_number(right)) {
         (Some(a), Some(b)) => Ok(Value::Bool(op(a, b))),
         _ => Err(format!("comparison requires numbers, found {left_type} and {right_type}")),
     }
@@ -396,8 +470,7 @@ fn add(left: Value, right: Value) -> Result<Value, String> {
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(a + b as f64)),
         (a, b) => Err(format!(
             "operator '+' is not defined for {} and {}",
-            type_name(&a),
-            type_name(&b)
+            type_name(&a), type_name(&b)
         )),
     }
 }
@@ -415,8 +488,7 @@ fn numeric_binary(
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(float_op(a, b as f64))),
         (a, b) => Err(format!(
             "numeric operator is not defined for {} and {}",
-            type_name(&a),
-            type_name(&b)
+            type_name(&a), type_name(&b)
         )),
     }
 }
@@ -431,8 +503,7 @@ fn divide(left: Value, right: Value) -> Result<Value, String> {
         (Value::Float(a), Value::Integer(b)) => Ok(Value::Float(a / b as f64)),
         (a, b) => Err(format!(
             "operator '/' is not defined for {} and {}",
-            type_name(&a),
-            type_name(&b)
+            type_name(&a), type_name(&b)
         )),
     }
 }
@@ -482,5 +553,37 @@ mod tests {
         let source = "fn inc(x: int) -> int { return x + 1; } fn main() { mut x: int = 0; while x < 3 { x = inc(x); } print(x); }";
         let program = program(source);
         assert!(execute(&program).is_ok());
+    }
+
+    #[test]
+    fn executes_filesystem_intrinsics() {
+        let program = program("fn main() {}");
+        let mut interpreter = Interpreter::new(&program);
+        let path = std::env::temp_dir().join("genix_interpreter_intrinsic_test.txt");
+        let path_text = path.to_string_lossy().to_string();
+        interpreter
+            .call_function(
+                "fs.write_text",
+                vec![Value::String(path_text.clone()), Value::String("Genix".into())],
+            )
+            .unwrap();
+        let result = interpreter
+            .call_function("fs.read_text", vec![Value::String(path_text)])
+            .unwrap();
+        assert_eq!(result, Some(Value::String("Genix".into())));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_environment_variable_returns_empty_string() {
+        let program = program("fn main() {}");
+        let mut interpreter = Interpreter::new(&program);
+        let result = interpreter
+            .call_function(
+                "process.env",
+                vec![Value::String("GENIX_ENV_UNLIKELY_9D31".into())],
+            )
+            .unwrap();
+        assert_eq!(result, Some(Value::String(String::new())));
     }
 }
