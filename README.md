@@ -4,13 +4,14 @@
 
 > Status: **pre-alpha / v0.0.1**. Syntax, runtime behavior, and compiler interfaces may change.
 
-## Create, run, and compile a Genix project
+## Create, run, inspect, and compile a Genix project
 
 ```bash
 gb new hello-genix
 cd hello-genix
 gb run
 gb check
+gb ir
 gb build
 ./build/hello-genix
 ```
@@ -31,28 +32,9 @@ hello-genix/
     └── main.gb
 ```
 
-`genix.toml`:
+## Compiler architecture
 
-```toml
-[project]
-name = "hello-genix"
-version = "0.1.0"
-entry = "src/main.gb"
-```
-
-`src/main.gb`:
-
-```gb
-fn main() {
-    print("Hello from Genix!");
-}
-```
-
-## Native compilation
-
-`gb build` now produces a **real host-native executable**.
-
-Current backend pipeline:
+Genix now has a backend-neutral, **typed intermediate representation (Genix IR)** between the frontend and native code generation.
 
 ```text
 Genix project / .gb files
@@ -67,12 +49,70 @@ AST
         ↓
 Static Type Checker
         ↓
-Genix C11 Backend
+Typed Genix IR
         ↓
+Backend
+        ├── C11 backend (implemented)
+        ├── LLVM backend (planned)
+        └── WebAssembly backend (planned)
+        ↓
+Native / target output
+```
+
+The IR resolves information that backends should not have to rediscover:
+
+- Function signatures
+- Variable types, including inferred types
+- Module-qualified function names
+- Expression result types
+- Explicit safe numeric widening casts such as `int → float`
+- Structured control flow
+
+This keeps language semantics in the frontend/IR layer and makes backends primarily responsible for target code generation.
+
+## Inspect Genix IR
+
+Use:
+
+```bash
+gb ir
+```
+
+or:
+
+```bash
+gb ir path/to/project
+gb ir examples/functions.gb
+```
+
+For example, source such as:
+
+```gb
+fn average(a: float, b: float) -> float {
+    return (a + b) / 2.0;
+}
+
+fn main() {
+    let result: float = average(10, 20);
+    print(result);
+}
+```
+
+is lowered to typed IR where the integer arguments are represented with explicit `cast<float>(...)` nodes before the backend sees them.
+
+## Native compilation
+
+`gb build` produces a real host-native executable from Genix IR.
+
+```text
+Typed Genix IR
+      ↓
+C11 code generator
+      ↓
 Generated C source
-        ↓
-System C compiler
-        ↓
+      ↓
+cc / clang / gcc
+      ↓
 Native executable
 ```
 
@@ -84,21 +124,23 @@ build/
 └── hello-genix
 ```
 
-The backend currently looks for the `CC` environment variable and then `cc`, `clang`, or `gcc`.
-
-Debug builds use `-O0 -g`:
+Debug build:
 
 ```bash
 gb build
 ```
 
-Release builds use `-O2`:
+uses `-O0 -g`.
+
+Release build:
 
 ```bash
 gb build --release
 ```
 
-The C11 backend is the first native backend. It gives Genix a working native compilation path while the compiler architecture evolves toward a dedicated IR and additional backends such as LLVM.
+uses `-O2`.
+
+The compiler checks the `CC` environment variable first, then tries `cc`, `clang`, and `gcc`.
 
 ## Multi-file modules
 
@@ -132,20 +174,19 @@ fn main() {
 }
 ```
 
-Imported functions are accessed through namespaces such as `math.twice(...)`. Internal calls within a module are automatically resolved to that module namespace.
+Imported functions are represented internally with names such as `math.twice`, giving the IR and backends deterministic module-qualified symbols.
 
 ## Developer CLI
 
 ```text
 gb new <name>                  Create a new Genix project
-gb run [target]                Run a .gb file or project through the interpreter
-gb check [target]              Check syntax, modules, and static types
-gb build [project] [--release] Build a native executable
+gb run [target]                Run through the interpreter
+gb check [target]              Check syntax, modules, and types
+gb ir [target]                 Print typed Genix IR
+gb build [project] [--release] Build a native executable from IR
 gb version                     Show the current version
 gb help                        Show help
 ```
-
-`gb run` and `gb check` default to the current project when no target is supplied.
 
 ## Language features implemented
 
@@ -153,7 +194,9 @@ Current support includes:
 
 - `.gb` source files
 - `genix.toml` projects
-- `gb new`, `gb run`, `gb check`, and native `gb build`
+- Typed Genix IR
+- Explicit IR numeric widening casts
+- `gb new`, `gb run`, `gb check`, `gb ir`, and `gb build`
 - Debug and release native builds
 - C11 native backend
 - Multi-file modules with `import module;`
@@ -167,21 +210,16 @@ Current support includes:
 - Guaranteed-return checking
 - Safe `int` → `float` widening
 - Immutable `let` and mutable `mut`
-- Compile-time mutability checks
-- Arithmetic: `+`, `-`, `*`, `/`
-- Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
-- Boolean logic: `&&`, `||`, `!`
+- Arithmetic, comparisons, and boolean logic
 - `if` / `else`
 - `while`
 - Lexical block scope
 - String concatenation
 - `print(...)`
 - `//` comments
-- Automated CI that builds and executes native Genix binaries
+- Automated CI that inspects IR and executes generated native binaries
 
 ## Native type mapping
-
-The first C11 backend maps Genix values to native C representations:
 
 | Genix | C11 backend |
 |---|---|
@@ -191,29 +229,15 @@ The first C11 backend maps Genix values to native C representations:
 | `string` | `const char*` |
 | void function | `void` |
 
-The generated runtime currently provides string concatenation and basic runtime failure handling.
-
-## Current backend limitations
-
-This is a bootstrap native compiler, not the final backend architecture.
+## Current limitations
 
 - Native builds currently target the host platform only.
-- A C compiler (`cc`, `clang`, or `gcc`) is required.
+- A C compiler is required for the current native backend.
 - Cross-compilation and target triples are not implemented yet.
-- The generated string runtime is intentionally minimal; full ownership/lifetime memory management is still to be designed.
+- The string runtime is intentionally minimal; the full memory-safety model is still to be designed.
 - Nested imports inside imported modules are not supported yet.
 - Package/registry imports are not implemented yet.
-
-## Single-file development
-
-Single files can still be interpreted and checked directly:
-
-```bash
-gb run examples/functions.gb
-gb check examples/functions.gb
-```
-
-Native `gb build` operates on projects with `genix.toml` so builds have a stable project name, entry point, and output directory.
+- LLVM and WebAssembly backends are not implemented yet.
 
 ## Repository architecture
 
@@ -223,29 +247,33 @@ src/
 ├── lexer.rs
 ├── parser.rs
 ├── typechecker.rs
+├── ir.rs
 ├── interpreter.rs
 ├── project.rs
 ├── codegen.rs
 └── main.rs
 ```
 
+The C backend consumes `ir::Program`, not the parser AST.
+
 ## Next compiler milestones
 
-The next compiler work should build on the now-working native path:
+With the IR boundary established, the next compiler work should focus on:
 
-- Genix IR between type checking and backend generation
-- Target triples and cross-compilation
-- Separate runtime integration through `genix-runtime`
-- Better source-span diagnostics
+- IR optimization passes
+- Target triples and explicit target selection
+- Cross-compilation architecture
+- Runtime integration through `genix-runtime`
+- Source-span diagnostics through AST → IR → backend
 - `gb test`
 - `gb fmt`
 - Standard-library integration
 - Package management and lockfiles
 - Memory-safety / ownership model
-- Concurrency / async
 - LLVM backend
+- WebAssembly backend
+- Concurrency / async
 - Language server and editor tooling
-- AI-native standard APIs
 
 ## Ecosystem
 
@@ -264,6 +292,7 @@ The next compiler work should build on the now-working native path:
 | Source extension | `.gb` |
 | CLI | `gb` |
 | Compiler | `gbc` (planned standalone compiler identity) |
+| Intermediate representation | Genix IR |
 
 ## Development
 
@@ -272,13 +301,13 @@ The compiler is implemented in **Rust**.
 ```bash
 cargo check
 cargo test
-cargo run -- run examples/project
+cargo run -- ir examples/project
 cargo run -- build examples/project
 ./examples/project/build/module-demo
 cargo run -- build examples/project --release
 ```
 
-GitHub Actions validates the Rust compiler, interpreter, modules, static type checker, project generator, native debug build, native release build, and execution of generated native binaries.
+GitHub Actions validates the compiler frontend, interpreter, module system, typed IR, IR numeric casts, native debug builds, native release builds, and execution of generated binaries.
 
 ## Project status
 
