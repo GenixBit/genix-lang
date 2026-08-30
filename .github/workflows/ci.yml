@@ -80,6 +80,37 @@ jobs:
       - name: Execute standard library native binary
         run: ./examples/stdlib/build/stdlib-demo
 
+      - name: Check host intrinsic project
+        run: cargo run -- check examples/intrinsics
+
+      - name: Run host intrinsics through interpreter
+        run: |
+          export GENIX_INTRINSIC_TEST=interpreter-host-ok
+          output=$(printf 'Ada\n' | cargo run --quiet -- run examples/intrinsics)
+          echo "$output"
+          echo "$output" | grep 'Hello Ada'
+          echo "$output" | grep 'interpreter-host-ok'
+          rm -f intrinsic-demo.txt
+
+      - name: Build host intrinsic native executable
+        run: cargo run -- build examples/intrinsics
+
+      - name: Verify intrinsic runtime lowering
+        run: |
+          grep 'gb_input' examples/intrinsics/build/intrinsic-demo.c
+          grep 'gb_fs_write_text' examples/intrinsics/build/intrinsic-demo.c
+          grep 'gb_fs_read_text' examples/intrinsics/build/intrinsic-demo.c
+          grep 'gb_env_get' examples/intrinsics/build/intrinsic-demo.c
+
+      - name: Execute host intrinsics in native binary
+        run: |
+          export GENIX_INTRINSIC_TEST=native-host-ok
+          output=$(printf 'Grace\n' | ./examples/intrinsics/build/intrinsic-demo)
+          echo "$output"
+          echo "$output" | grep 'Hello Grace'
+          echo "$output" | grep 'native-host-ok'
+          rm -f intrinsic-demo.txt
+
       - name: Build native debug executable with runtime
         run: cargo run -- build examples/project
 
