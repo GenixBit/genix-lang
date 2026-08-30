@@ -1,0 +1,30 @@
+name: Genix CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check compiler
+        run: cargo check
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Run hello example
+        run: cargo run -- run examples/hello.gb
+
+      - name: Validate basics example
+        run: cargo run -- check examples/basics.gb
