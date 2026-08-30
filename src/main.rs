@@ -1,6 +1,7 @@
 mod ast;
 mod codegen;
 mod interpreter;
+mod ir;
 mod lexer;
 mod parser;
 mod project;
@@ -23,6 +24,7 @@ fn main() {
         }
         Some("run") => run_target(args.next().as_deref()),
         Some("check") => check_target(args.next().as_deref()),
+        Some("ir") => ir_target(args.next().as_deref()),
         Some("build") => build_target(args.collect()),
         Some("version") | Some("--version") | Some("-V") => {
             println!("Genix 0.0.1 (pre-alpha)");
@@ -85,6 +87,22 @@ fn check_target(target: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+fn ir_target(target: Option<&str>) -> Result<(), String> {
+    if let Some(path) = target.filter(|path| is_gb_file(path)) {
+        let source = read_source(path)?;
+        let ast = compile_frontend(&source)?;
+        let lowered = ir::lower(&ast)?;
+        print!("{}", ir::format(&lowered));
+        return Ok(());
+    }
+
+    let root = target.unwrap_or(".");
+    let loaded = project::load_project(Path::new(root))?;
+    let lowered = ir::lower(&loaded.program)?;
+    print!("{}", ir::format(&lowered));
+    Ok(())
+}
+
 fn build_target(args: Vec<String>) -> Result<(), String> {
     let mut target: Option<String> = None;
     let mut release = false;
@@ -107,8 +125,9 @@ fn build_target(args: Vec<String>) -> Result<(), String> {
     }
 
     let loaded = project::load_project(Path::new(root))?;
+    let lowered = ir::lower(&loaded.program)?;
     let artifact = codegen::build_native(
-        &loaded.program,
+        &lowered,
         &loaded.root,
         &loaded.config.name,
         release,
@@ -119,6 +138,7 @@ fn build_target(args: Vec<String>) -> Result<(), String> {
         "✓ native {profile} build completed for '{}'",
         loaded.config.name
     );
+    println!("  pipeline: AST -> typed Genix IR -> C11 -> native executable");
     println!("  compiler: {}", artifact.compiler);
     println!("  C source: {}", artifact.source.display());
     println!("  executable: {}", artifact.executable.display());
@@ -160,7 +180,8 @@ fn print_help() {
     println!("  gb new <name>                  Create a new Genix project");
     println!("  gb run [target]                Run a .gb file or project");
     println!("  gb check [target]              Check a .gb file or project");
-    println!("  gb build [project] [--release] Build a native executable");
+    println!("  gb ir [target]                 Print typed Genix intermediate representation");
+    println!("  gb build [project] [--release] Build a native executable from Genix IR");
     println!("  gb version                     Show the current version");
     println!("  gb help                        Show this help");
     println!();
