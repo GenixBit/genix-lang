@@ -1,29 +1,46 @@
-use crate::ast::{BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, Stmt, Type, UnaryOp};
+use crate::ast::{
+    BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, Stmt, StmtKind, Type, UnaryOp,
+};
+use crate::diagnostics::{Diagnostic, Span};
 use crate::lexer::{Token, TokenKind};
 
-pub fn parse(tokens: Vec<Token>) -> Result<Program, String> {
-    Parser { tokens, current: 0 }.parse_program()
+pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
+    parse_named(tokens, "<memory>")
+}
+
+pub fn parse_named(tokens: Vec<Token>, source_name: impl Into<String>) -> Result<Program, Diagnostic> {
+    Parser {
+        tokens,
+        current: 0,
+        source_name: source_name.into(),
+    }
+    .parse_program()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     current: usize,
+    source_name: String,
 }
 
 impl Parser {
-    fn parse_program(&mut self) -> Result<Program, String> {
+    fn parse_program(&mut self) -> Result<Program, Diagnostic> {
         let mut functions = Vec::new();
         while !self.check(&TokenKind::Eof) {
             functions.push(self.parse_function()?);
         }
         self.expect_simple(TokenKind::Eof, "unexpected tokens after program")?;
         if functions.is_empty() {
-            return Err("Genix program must define at least fn main()".into());
+            return Err(
+                self.error_here("Genix program must define at least fn main()")
+                    .with_help("add `fn main() { ... }` as the program entry point"),
+            );
         }
         Ok(Program { functions })
     }
 
-    fn parse_function(&mut self) -> Result<Function, String> {
+    fn parse_function(&mut self) -> Result<Function, Diagnostic> {
+        let start = self.peek().clone();
         self.expect_simple(TokenKind::Fn, "expected 'fn'")?;
         let name = self.expect_identifier("expected function name after 'fn'")?;
         self.expect_simple(TokenKind::LParen, "expected '(' after function name")?;
@@ -33,7 +50,10 @@ impl Parser {
             loop {
                 let param_name = self.expect_identifier("expected parameter name")?;
                 self.expect_simple(TokenKind::Colon, "expected ':' after parameter name")?;
-                params.push(Param { name: param_name, ty: self.parse_type()? });
+                params.push(Param {
+                    name: param_name,
+                    ty: self.parse_type()?,
+                });
                 if !self.matches(&TokenKind::Comma) {
                     break;
                 }
@@ -50,13 +70,24 @@ impl Parser {
             Type::Void
         };
         let body = self.parse_block()?;
-        Ok(Function { name, params, return_type, body })
+        let span = self.span_from(&start);
+        Ok(Function {
+            name,
+            params,
+            return_type,
+            body,
+            source_name: self.source_name.clone(),
+            span,
+        })
     }
 
-    fn parse_type(&mut self) -> Result<Type, String> {
+    fn parse_type(&mut self) -> Result<Type, Diagnostic> {
         let token = self.advance().clone();
         let TokenKind::Identifier(name) = token.kind else {
-            return Err(format!("expected type at {}:{}", token.line, token.column));
+            return Err(
+                self.error_at(&token, "E0101", "expected a Genix type")
+                    .with_label("type expected here"),
+            );
         };
 
         match name.as_str() {
@@ -70,7 +101,13 @@ impl Parser {
                 let inner = self.parse_type()?;
                 self.expect_simple(TokenKind::Greater, "expected '>' after Option type")?;
                 Type::option(inner).ok_or_else(|| {
-                    format!("Option<{inner}> is not supported in Genix v0.1; Option currently supports primitive payloads")
+                    self.error_at(
+                        &token,
+                        "E0102",
+                        format!("Option<{inner}> is not supported in Genix v0.1"),
+                    )
+                    .with_label("unsupported Option payload")
+                    .with_help("Option currently supports int, float, bool, and string payloads")
                 })
             }
             "Result" => {
@@ -80,14 +117,24 @@ impl Parser {
                 let error = self.parse_type()?;
                 self.expect_simple(TokenKind::Greater, "expected '>' after Result types")?;
                 Type::result(ok, error).ok_or_else(|| {
-                    format!("Result<{ok},{error}> is not supported in Genix v0.1; Result errors currently use string")
+                    self.error_at(
+                        &token,
+                        "E0102",
+                        format!("Result<{ok},{error}> is not supported in Genix v0.1"),
+                    )
+                    .with_label("unsupported Result shape")
+                    .with_help("Result currently supports primitive success values and string errors")
                 })
             }
-            _ => Err(format!("unknown Genix type '{name}' at {}:{}", token.line, token.column)),
+            _ => Err(
+                self.error_at(&token, "E0101", format!("unknown Genix type '{name}'"))
+                    .with_label("unknown type")
+                    .with_help("use int, float, bool, string, Option<T>, or Result<T,string>"),
+            ),
         }
     }
 
-    fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
+    fn parse_block(&mut self) -> Result<Vec<Stmt>, Diagnostic> {
         self.expect_simple(TokenKind::LBrace, "expected '{'")?;
         let mut body = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
@@ -97,92 +144,112 @@ impl Parser {
         Ok(body)
     }
 
-    fn parse_statement(&mut self) -> Result<Stmt, String> {
-        if self.matches(&TokenKind::Let) {
-            return self.parse_binding(false);
-        }
-        if self.matches(&TokenKind::Mut) {
-            return self.parse_binding(true);
-        }
-        if self.matches(&TokenKind::Return) {
-            return self.parse_return();
-        }
-        if self.matches(&TokenKind::If) {
-            return self.parse_if();
-        }
-        if self.matches(&TokenKind::While) {
-            return self.parse_while();
-        }
-        if self.matches(&TokenKind::Match) {
-            return self.parse_match();
-        }
-        if self.check(&TokenKind::LBrace) {
-            return Ok(Stmt::Block(self.parse_block()?));
-        }
-
-        if let TokenKind::Identifier(name) = self.peek().kind.clone() {
+    fn parse_statement(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.peek().clone();
+        let kind = if self.matches(&TokenKind::Let) {
+            self.parse_binding(false)?
+        } else if self.matches(&TokenKind::Mut) {
+            self.parse_binding(true)?
+        } else if self.matches(&TokenKind::Return) {
+            self.parse_return()?
+        } else if self.matches(&TokenKind::If) {
+            self.parse_if()?
+        } else if self.matches(&TokenKind::While) {
+            self.parse_while()?
+        } else if self.matches(&TokenKind::Match) {
+            self.parse_match()?
+        } else if self.check(&TokenKind::LBrace) {
+            StmtKind::Block(self.parse_block()?)
+        } else if let TokenKind::Identifier(name) = self.peek().kind.clone() {
             if self.check_next(&TokenKind::Equal) {
                 self.advance();
                 self.advance();
                 let value = self.parse_expression()?;
                 self.consume_optional_semicolon();
-                return Ok(Stmt::Assign { name, value });
-            }
-            if name == "print" {
+                StmtKind::Assign { name, value }
+            } else if name == "print" {
                 self.advance();
                 self.expect_simple(TokenKind::LParen, "expected '(' after print")?;
                 let expr = self.parse_expression()?;
                 self.expect_simple(TokenKind::RParen, "expected ')' after print argument")?;
                 self.consume_optional_semicolon();
-                return Ok(Stmt::Print(expr));
+                StmtKind::Print(expr)
+            } else {
+                self.parse_expression_statement()?
             }
-        }
+        } else {
+            self.parse_expression_statement()?
+        };
 
+        Ok(Stmt::new(kind, self.span_from(&start)))
+    }
+
+    fn parse_expression_statement(&mut self) -> Result<StmtKind, Diagnostic> {
         let expr = self.parse_expression()?;
         self.consume_optional_semicolon();
         if matches!(expr, Expr::Call { .. } | Expr::Try(_)) {
-            Ok(Stmt::Expr(expr))
+            Ok(StmtKind::Expr(expr))
         } else {
-            Err(self.error_here("only function calls may be used as expression statements"))
+            Err(
+                self.error_here("only function calls may be used as expression statements")
+                    .with_help("assign the value to a variable, return it, or pass it to a function"),
+            )
         }
     }
 
-    fn parse_binding(&mut self, mutable: bool) -> Result<Stmt, String> {
+    fn parse_binding(&mut self, mutable: bool) -> Result<StmtKind, Diagnostic> {
         let name = self.expect_identifier("expected variable name")?;
-        let annotation = if self.matches(&TokenKind::Colon) { Some(self.parse_type()?) } else { None };
+        let annotation = if self.matches(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         self.expect_simple(TokenKind::Equal, "expected '=' after variable name")?;
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
-        Ok(Stmt::Let { name, value, mutable, annotation })
+        Ok(StmtKind::Let {
+            name,
+            value,
+            mutable,
+            annotation,
+        })
     }
 
-    fn parse_return(&mut self) -> Result<Stmt, String> {
+    fn parse_return(&mut self) -> Result<StmtKind, Diagnostic> {
         if self.check(&TokenKind::Semicolon) {
             self.advance();
-            return Ok(Stmt::Return(None));
+            return Ok(StmtKind::Return(None));
         }
         if self.check(&TokenKind::RBrace) {
-            return Ok(Stmt::Return(None));
+            return Ok(StmtKind::Return(None));
         }
         let value = self.parse_expression()?;
         self.consume_optional_semicolon();
-        Ok(Stmt::Return(Some(value)))
+        Ok(StmtKind::Return(Some(value)))
     }
 
-    fn parse_if(&mut self) -> Result<Stmt, String> {
+    fn parse_if(&mut self) -> Result<StmtKind, Diagnostic> {
         let condition = self.parse_expression()?;
         let then_branch = self.parse_block()?;
-        let else_branch = if self.matches(&TokenKind::Else) { Some(self.parse_block()?) } else { None };
-        Ok(Stmt::If { condition, then_branch, else_branch })
+        let else_branch = if self.matches(&TokenKind::Else) {
+            Some(self.parse_block()?)
+        } else {
+            None
+        };
+        Ok(StmtKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        })
     }
 
-    fn parse_while(&mut self) -> Result<Stmt, String> {
+    fn parse_while(&mut self) -> Result<StmtKind, Diagnostic> {
         let condition = self.parse_expression()?;
         let body = self.parse_block()?;
-        Ok(Stmt::While { condition, body })
+        Ok(StmtKind::While { condition, body })
     }
 
-    fn parse_match(&mut self) -> Result<Stmt, String> {
+    fn parse_match(&mut self) -> Result<StmtKind, Diagnostic> {
         let value = self.parse_expression()?;
         self.expect_simple(TokenKind::LBrace, "expected '{' after match value")?;
         let mut arms = Vec::new();
@@ -195,15 +262,21 @@ impl Parser {
         }
         self.expect_simple(TokenKind::RBrace, "expected '}' after match arms")?;
         if arms.is_empty() {
-            return Err("match requires at least one arm".into());
+            return Err(
+                self.error_here("match requires at least one arm")
+                    .with_help("add Some/None or Ok/Err match arms"),
+            );
         }
-        Ok(Stmt::Match { value, arms })
+        Ok(StmtKind::Match { value, arms })
     }
 
-    fn parse_pattern(&mut self) -> Result<Pattern, String> {
+    fn parse_pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let token = self.advance().clone();
         let TokenKind::Identifier(name) = token.kind else {
-            return Err(format!("expected match pattern at {}:{}", token.line, token.column));
+            return Err(
+                self.error_at(&token, "E0103", "expected a match pattern")
+                    .with_label("pattern expected here"),
+            );
         };
         match name.as_str() {
             "Some" => {
@@ -225,46 +298,66 @@ impl Parser {
                 self.expect_simple(TokenKind::RParen, "expected ')' after Err binding")?;
                 Ok(Pattern::Err(binding))
             }
-            _ => Err(format!("unknown match pattern '{name}' at {}:{}", token.line, token.column)),
+            _ => Err(
+                self.error_at(&token, "E0103", format!("unknown match pattern '{name}'"))
+                    .with_label("invalid pattern")
+                    .with_help("use Some(name), None, Ok(name), or Err(name)"),
+            ),
         }
     }
 
-    fn parse_expression(&mut self) -> Result<Expr, String> { self.parse_or() }
+    fn parse_expression(&mut self) -> Result<Expr, Diagnostic> {
+        self.parse_or()
+    }
 
-    fn parse_or(&mut self) -> Result<Expr, String> {
+    fn parse_or(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_and()?;
         while self.matches(&TokenKind::OrOr) {
             let right = self.parse_and()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::Or, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_and(&mut self) -> Result<Expr, String> {
+    fn parse_and(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_equality()?;
         while self.matches(&TokenKind::AndAnd) {
             let right = self.parse_equality()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::And, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_equality(&mut self) -> Result<Expr, String> {
+    fn parse_equality(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_comparison()?;
         loop {
             let op = if self.matches(&TokenKind::EqualEqual) {
                 Some(BinaryOp::Equal)
             } else if self.matches(&TokenKind::BangEqual) {
                 Some(BinaryOp::NotEqual)
-            } else { None };
+            } else {
+                None
+            };
             let Some(op) = op else { break };
             let right = self.parse_comparison()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_comparison(&mut self) -> Result<Expr, String> {
+    fn parse_comparison(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_addition()?;
         loop {
             let op = if self.matches(&TokenKind::Less) {
@@ -275,82 +368,134 @@ impl Parser {
                 Some(BinaryOp::Greater)
             } else if self.matches(&TokenKind::GreaterEqual) {
                 Some(BinaryOp::GreaterEqual)
-            } else { None };
+            } else {
+                None
+            };
             let Some(op) = op else { break };
             let right = self.parse_addition()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_addition(&mut self) -> Result<Expr, String> {
+    fn parse_addition(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_multiplication()?;
         loop {
             let op = if self.matches(&TokenKind::Plus) {
                 Some(BinaryOp::Add)
             } else if self.matches(&TokenKind::Minus) {
                 Some(BinaryOp::Subtract)
-            } else { None };
+            } else {
+                None
+            };
             let Some(op) = op else { break };
             let right = self.parse_multiplication()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_multiplication(&mut self) -> Result<Expr, String> {
+    fn parse_multiplication(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_unary()?;
         loop {
             let op = if self.matches(&TokenKind::Star) {
                 Some(BinaryOp::Multiply)
             } else if self.matches(&TokenKind::Slash) {
                 Some(BinaryOp::Divide)
-            } else { None };
+            } else {
+                None
+            };
             let Some(op) = op else { break };
             let right = self.parse_unary()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, String> {
+    fn parse_unary(&mut self) -> Result<Expr, Diagnostic> {
         if self.matches(&TokenKind::Minus) {
-            return Ok(Expr::Unary { op: UnaryOp::Negate, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Negate,
+                expr: Box::new(self.parse_unary()?),
+            });
         }
         if self.matches(&TokenKind::Bang) {
-            return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(self.parse_unary()?),
+            });
         }
         self.parse_postfix()
     }
 
-    fn parse_postfix(&mut self) -> Result<Expr, String> {
+    fn parse_postfix(&mut self) -> Result<Expr, Diagnostic> {
         let mut expr = self.parse_primary()?;
         loop {
             if self.matches(&TokenKind::LParen) {
+                let call_token = self.previous().clone();
                 let mut arguments = Vec::new();
                 if !self.check(&TokenKind::RParen) {
                     loop {
                         arguments.push(self.parse_expression()?);
-                        if !self.matches(&TokenKind::Comma) { break; }
+                        if !self.matches(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
                 self.expect_simple(TokenKind::RParen, "expected ')' after function arguments")?;
                 expr = match expr {
                     Expr::Variable(callee) if callee == "Some" => {
-                        if arguments.len() != 1 { return Err("Some(...) requires exactly one value".into()); }
+                        if arguments.len() != 1 {
+                            return Err(
+                                self.error_at(&call_token, "E0104", "Some(...) requires exactly one value")
+                                    .with_help("pass one value, for example Some(value)"),
+                            );
+                        }
                         Expr::Some(Box::new(arguments.remove(0)))
                     }
                     Expr::Variable(callee) if callee == "Ok" => {
-                        if arguments.len() != 1 { return Err("Ok(...) requires exactly one value".into()); }
+                        if arguments.len() != 1 {
+                            return Err(
+                                self.error_at(&call_token, "E0104", "Ok(...) requires exactly one value")
+                                    .with_help("pass one success value, for example Ok(value)"),
+                            );
+                        }
                         Expr::Ok(Box::new(arguments.remove(0)))
                     }
                     Expr::Variable(callee) if callee == "Err" => {
-                        if arguments.len() != 1 { return Err("Err(...) requires exactly one error value".into()); }
+                        if arguments.len() != 1 {
+                            return Err(
+                                self.error_at(&call_token, "E0104", "Err(...) requires exactly one error value")
+                                    .with_help("pass one string error, for example Err(\"message\")"),
+                            );
+                        }
                         Expr::Err(Box::new(arguments.remove(0)))
                     }
-                    Expr::Variable(callee) if callee == "None" => return Err("None does not take arguments".into()),
+                    Expr::Variable(callee) if callee == "None" => {
+                        return Err(
+                            self.error_at(&call_token, "E0104", "None does not take arguments")
+                                .with_help("write None without parentheses"),
+                        )
+                    }
                     Expr::Variable(callee) => Expr::Call { callee, arguments },
-                    _ => return Err(self.error_here("only named functions can be called in Genix v0.1")),
+                    _ => {
+                        return Err(
+                            self.error_here("only named functions can be called in Genix v0.1")
+                                .with_help("call a function by name, such as load() or fs.read_text(...)"),
+                        )
+                    }
                 };
             } else if self.matches(&TokenKind::Question) {
                 expr = Expr::Try(Box::new(expr));
@@ -361,7 +506,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_primary(&mut self) -> Result<Expr, String> {
+    fn parse_primary(&mut self) -> Result<Expr, Diagnostic> {
         let token = self.advance().clone();
         match token.kind {
             TokenKind::Integer(value) => Ok(Expr::Integer(value)),
@@ -386,28 +531,33 @@ impl Parser {
                 self.expect_simple(TokenKind::RParen, "expected ')' after expression")?;
                 Ok(expr)
             }
-            _ => Err(format!("expected expression at {}:{}", token.line, token.column)),
+            _ => Err(
+                self.error_at(&token, "E0100", "expected expression")
+                    .with_label("expression expected here"),
+            ),
         }
     }
 
     fn consume_optional_semicolon(&mut self) {
-        if self.check(&TokenKind::Semicolon) { self.advance(); }
-    }
-
-    fn expect_identifier(&mut self, message: &str) -> Result<String, String> {
-        let token = self.advance().clone();
-        match token.kind {
-            TokenKind::Identifier(name) => Ok(name),
-            _ => Err(format!("{message} at {}:{}", token.line, token.column)),
+        if self.check(&TokenKind::Semicolon) {
+            self.advance();
         }
     }
 
-    fn expect_simple(&mut self, expected: TokenKind, message: &str) -> Result<(), String> {
+    fn expect_identifier(&mut self, message: &str) -> Result<String, Diagnostic> {
+        let token = self.advance().clone();
+        match token.kind {
+            TokenKind::Identifier(name) => Ok(name),
+            _ => Err(self.error_at(&token, "E0100", message).with_label("identifier expected here")),
+        }
+    }
+
+    fn expect_simple(&mut self, expected: TokenKind, message: &str) -> Result<(), Diagnostic> {
         if self.check(&expected) {
             self.advance();
             Ok(())
         } else {
-            Err(self.error_here(message))
+            Err(self.error_here(message).with_label("syntax error"))
         }
     }
 
@@ -415,7 +565,9 @@ impl Parser {
         if self.check(expected) {
             self.advance();
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 
     fn check(&self, expected: &TokenKind) -> bool {
@@ -423,7 +575,8 @@ impl Parser {
     }
 
     fn check_next(&self, expected: &TokenKind) -> bool {
-        self.tokens.get(self.current + 1)
+        self.tokens
+            .get(self.current + 1)
             .map(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(expected))
             .unwrap_or(false)
     }
@@ -432,14 +585,41 @@ impl Parser {
         if self.current < self.tokens.len() - 1 {
             self.current += 1;
             &self.tokens[self.current - 1]
-        } else { &self.tokens[self.current] }
+        } else {
+            &self.tokens[self.current]
+        }
     }
 
-    fn peek(&self) -> &Token { &self.tokens[self.current] }
+    fn peek(&self) -> &Token {
+        &self.tokens[self.current]
+    }
 
-    fn error_here(&self, message: &str) -> String {
+    fn previous(&self) -> &Token {
+        if self.current == 0 {
+            &self.tokens[0]
+        } else {
+            &self.tokens[self.current - 1]
+        }
+    }
+
+    fn span_from(&self, start: &Token) -> Span {
+        let end = self.previous();
+        Span::between(
+            start.line,
+            start.column,
+            end.line,
+            end.column + end.width.saturating_sub(1),
+        )
+    }
+
+    fn error_here(&self, message: impl Into<String>) -> Diagnostic {
         let token = self.peek();
-        format!("{message} at {}:{}", token.line, token.column)
+        self.error_at(token, "E0100", message)
+    }
+
+    fn error_at(&self, token: &Token, code: &'static str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(code, message)
+            .with_location(self.source_name.clone(), token.span())
     }
 }
 
@@ -456,6 +636,13 @@ mod tests {
         assert_eq!(program.functions[0].name, "add");
         assert_eq!(program.functions[0].params.len(), 2);
         assert_eq!(program.functions[0].return_type, Type::Int);
+        assert!(program.functions[0].span.end_column >= program.functions[0].span.column);
+    }
+
+    #[test]
+    fn preserves_source_name() {
+        let program = parse_named(lex("fn main() {}").unwrap(), "src/main.gb").unwrap();
+        assert_eq!(program.functions[0].source_name, "src/main.gb");
     }
 
     #[test]
@@ -463,16 +650,24 @@ mod tests {
         let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn main() { let x: Result<string,string> = load(); match x { Ok(v) => { print(v); } Err(e) => { print(e); } } }";
         let program = parse(lex(source).unwrap()).unwrap();
         assert_eq!(program.functions[0].return_type, Type::ResultString);
-        assert!(matches!(program.functions[1].body[1], Stmt::Match { .. }));
+        assert!(matches!(program.functions[1].body[1].kind, StmtKind::Match { .. }));
     }
 
     #[test]
     fn parses_try_postfix() {
         let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn wrapper() -> Result<string,string> { let x: string = load()?; return Ok(x); } fn main() {}";
         let program = parse(lex(source).unwrap()).unwrap();
-        match &program.functions[1].body[0] {
-            Stmt::Let { value: Expr::Try(_), .. } => {}
+        match &program.functions[1].body[0].kind {
+            StmtKind::Let { value: Expr::Try(_), .. } => {}
             _ => panic!("expected try expression"),
         }
+    }
+
+    #[test]
+    fn reports_source_aware_syntax_errors() {
+        let error = parse_named(lex("fn main( {").unwrap(), "src/main.gb").unwrap_err();
+        assert_eq!(error.code, "E0100");
+        assert_eq!(error.source_name.as_deref(), Some("src/main.gb"));
+        assert!(error.span.is_some());
     }
 }
