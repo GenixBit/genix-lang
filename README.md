@@ -50,9 +50,34 @@ Native executable
 
 The C backend consumes typed Genix IR, not the parser AST.
 
+## Compiler diagnostics
+
+Genix now has coded, source-aware compiler diagnostics for direct `.gb` source commands.
+
+```text
+error[E0201]: initializer for 'age' expected int, found string
+ --> src/main.gb:2:20
+   |
+ 2 |     let age: int = "twenty";
+   |                    ^^^^^^^^ type mismatch
+  = help: change the expression or annotation so the types are compatible
+```
+
+Current error-code families:
+
+```text
+E000x  lexer
+E010x  parser / syntax
+E020x  static type checking
+```
+
+The diagnostic model carries an error code, source filename, line/column span, primary label, and optional help. Lexer/parser diagnostics use exact token spans. Type-checker messages are classified and mapped back to relevant source locations by the frontend diagnostics adapter.
+
+The executable AST and Genix IR intentionally remain independent from rendering metadata. Rich multi-file source maps can therefore evolve without coupling the interpreter or native backend to terminal presentation concerns.
+
 ## Typed error handling
 
-Genix now supports primitive-payload `Option` and `Result` values.
+Genix supports primitive-payload `Option` and `Result` values.
 
 ```gb
 fn load(path: string) -> Result<string,string> {
@@ -214,6 +239,8 @@ gb help                        Show help
 - Exhaustive `match` for Option/Result
 - Result propagation with `?`
 - Type inference and static checking
+- Coded source-aware lexer/parser/type diagnostics
+- Error spans, labels, help text, and stable error-code families
 - Safe `int → float` widening
 - `let` / `mut`
 - Arithmetic, comparisons, and boolean logic
@@ -234,6 +261,7 @@ gb help                        Show help
 - Runtime string representation and memory ownership are temporary.
 - Option/Result currently support primitive payloads only; Result errors are strings.
 - `?` placement is intentionally restricted while IR control-flow lowering is generalized.
+- Direct-file lexer/parser diagnostics have exact spans; merged multi-file semantic source maps are still being generalized.
 - Nested module imports and packages/registry are not implemented yet.
 - General native FFI, LLVM, and WebAssembly backends are not implemented yet.
 
@@ -242,6 +270,7 @@ gb help                        Show help
 ```text
 src/
 ├── ast.rs
+├── diagnostics.rs
 ├── lexer.rs
 ├── parser.rs
 ├── typechecker.rs
@@ -256,9 +285,9 @@ src/
 
 The next priorities are:
 
-- Source-span diagnostics and substantially better compiler errors
 - `gb test`
 - `gb fmt`
+- Rich multi-file source maps and secondary diagnostic labels
 - Generalized enums and generics
 - Stable toolchain installation/discovery
 - General native FFI declarations
@@ -306,7 +335,7 @@ cargo run -- build examples/error_handling
 ./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`, including typed error handling and recoverable host I/O.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It now also executes intentionally invalid source files and verifies diagnostic error codes, locations, carets, and help output.
 
 ---
 
