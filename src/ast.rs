@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::diagnostics::Span;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub functions: Vec<Function>,
@@ -11,6 +13,8 @@ pub struct Function {
     pub params: Vec<Param>,
     pub return_type: Type,
     pub body: Vec<Stmt>,
+    pub source_name: String,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -106,7 +110,19 @@ impl fmt::Display for Type {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, span: Span) -> Self {
+        Self { kind, span }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StmtKind {
     Let {
         name: String,
         value: Expr,
