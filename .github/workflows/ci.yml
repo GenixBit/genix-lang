@@ -41,13 +41,22 @@ jobs:
       - name: Run multi-file project
         run: cargo run -- run examples/project
 
-      - name: Build native debug executable
+      - name: Inspect typed Genix IR
+        run: |
+          cargo run -- ir examples/project > /tmp/module-demo.gir
+          grep "fn math.twice" /tmp/module-demo.gir
+          grep "answer: int" /tmp/module-demo.gir
+
+      - name: Verify explicit IR widening cast
+        run: cargo run -- ir examples/functions.gb | grep "cast<float>"
+
+      - name: Build native debug executable from IR
         run: cargo run -- build examples/project
 
       - name: Execute native debug binary
         run: ./examples/project/build/module-demo
 
-      - name: Build native release executable
+      - name: Build native release executable from IR
         run: cargo run -- build examples/project --release
 
       - name: Execute native release binary
@@ -58,5 +67,6 @@ jobs:
           cargo run -- new /tmp/genix-ci-app
           cargo run -- check /tmp/genix-ci-app
           cargo run -- run /tmp/genix-ci-app
+          cargo run -- ir /tmp/genix-ci-app
           cargo run -- build /tmp/genix-ci-app
           /tmp/genix-ci-app/build/genix-ci-app
