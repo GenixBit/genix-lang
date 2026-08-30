@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOp, Expr, Function, Param, Program, Stmt, Type, UnaryOp};
+use crate::ast::{BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, Stmt, Type, UnaryOp};
 use crate::lexer::{Token, TokenKind};
 
 pub fn parse(tokens: Vec<Token>) -> Result<Program, String> {
@@ -55,16 +55,35 @@ impl Parser {
 
     fn parse_type(&mut self) -> Result<Type, String> {
         let token = self.advance().clone();
-        match token.kind {
-            TokenKind::Identifier(name) => match name.as_str() {
-                "int" => Ok(Type::Int),
-                "float" => Ok(Type::Float),
-                "bool" => Ok(Type::Bool),
-                "string" => Ok(Type::String),
-                "void" => Ok(Type::Void),
-                _ => Err(format!("unknown Genix type '{name}' at {}:{}", token.line, token.column)),
-            },
-            _ => Err(format!("expected type at {}:{}", token.line, token.column)),
+        let TokenKind::Identifier(name) = token.kind else {
+            return Err(format!("expected type at {}:{}", token.line, token.column));
+        };
+
+        match name.as_str() {
+            "int" => Ok(Type::Int),
+            "float" => Ok(Type::Float),
+            "bool" => Ok(Type::Bool),
+            "string" => Ok(Type::String),
+            "void" => Ok(Type::Void),
+            "Option" => {
+                self.expect_simple(TokenKind::Less, "expected '<' after Option")?;
+                let inner = self.parse_type()?;
+                self.expect_simple(TokenKind::Greater, "expected '>' after Option type")?;
+                Type::option(inner).ok_or_else(|| {
+                    format!("Option<{inner}> is not supported in Genix v0.1; Option currently supports primitive payloads")
+                })
+            }
+            "Result" => {
+                self.expect_simple(TokenKind::Less, "expected '<' after Result")?;
+                let ok = self.parse_type()?;
+                self.expect_simple(TokenKind::Comma, "expected ',' between Result types")?;
+                let error = self.parse_type()?;
+                self.expect_simple(TokenKind::Greater, "expected '>' after Result types")?;
+                Type::result(ok, error).ok_or_else(|| {
+                    format!("Result<{ok},{error}> is not supported in Genix v0.1; Result errors currently use string")
+                })
+            }
+            _ => Err(format!("unknown Genix type '{name}' at {}:{}", token.line, token.column)),
         }
     }
 
@@ -94,6 +113,9 @@ impl Parser {
         if self.matches(&TokenKind::While) {
             return self.parse_while();
         }
+        if self.matches(&TokenKind::Match) {
+            return self.parse_match();
+        }
         if self.check(&TokenKind::LBrace) {
             return Ok(Stmt::Block(self.parse_block()?));
         }
@@ -118,7 +140,7 @@ impl Parser {
 
         let expr = self.parse_expression()?;
         self.consume_optional_semicolon();
-        if matches!(expr, Expr::Call { .. }) {
+        if matches!(expr, Expr::Call { .. } | Expr::Try(_)) {
             Ok(Stmt::Expr(expr))
         } else {
             Err(self.error_here("only function calls may be used as expression statements"))
@@ -158,6 +180,53 @@ impl Parser {
         let condition = self.parse_expression()?;
         let body = self.parse_block()?;
         Ok(Stmt::While { condition, body })
+    }
+
+    fn parse_match(&mut self) -> Result<Stmt, String> {
+        let value = self.parse_expression()?;
+        self.expect_simple(TokenKind::LBrace, "expected '{' after match value")?;
+        let mut arms = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            let pattern = self.parse_pattern()?;
+            self.expect_simple(TokenKind::FatArrow, "expected '=>' after match pattern")?;
+            let body = self.parse_block()?;
+            self.matches(&TokenKind::Comma);
+            arms.push(MatchArm { pattern, body });
+        }
+        self.expect_simple(TokenKind::RBrace, "expected '}' after match arms")?;
+        if arms.is_empty() {
+            return Err("match requires at least one arm".into());
+        }
+        Ok(Stmt::Match { value, arms })
+    }
+
+    fn parse_pattern(&mut self) -> Result<Pattern, String> {
+        let token = self.advance().clone();
+        let TokenKind::Identifier(name) = token.kind else {
+            return Err(format!("expected match pattern at {}:{}", token.line, token.column));
+        };
+        match name.as_str() {
+            "Some" => {
+                self.expect_simple(TokenKind::LParen, "expected '(' after Some")?;
+                let binding = self.expect_identifier("expected binding name in Some pattern")?;
+                self.expect_simple(TokenKind::RParen, "expected ')' after Some binding")?;
+                Ok(Pattern::Some(binding))
+            }
+            "None" => Ok(Pattern::None),
+            "Ok" => {
+                self.expect_simple(TokenKind::LParen, "expected '(' after Ok")?;
+                let binding = self.expect_identifier("expected binding name in Ok pattern")?;
+                self.expect_simple(TokenKind::RParen, "expected ')' after Ok binding")?;
+                Ok(Pattern::Ok(binding))
+            }
+            "Err" => {
+                self.expect_simple(TokenKind::LParen, "expected '(' after Err")?;
+                let binding = self.expect_identifier("expected binding name in Err pattern")?;
+                self.expect_simple(TokenKind::RParen, "expected ')' after Err binding")?;
+                Ok(Pattern::Err(binding))
+            }
+            _ => Err(format!("unknown match pattern '{name}' at {}:{}", token.line, token.column)),
+        }
     }
 
     fn parse_expression(&mut self) -> Result<Expr, String> { self.parse_or() }
@@ -251,24 +320,43 @@ impl Parser {
         if self.matches(&TokenKind::Bang) {
             return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(self.parse_unary()?) });
         }
-        self.parse_call()
+        self.parse_postfix()
     }
 
-    fn parse_call(&mut self) -> Result<Expr, String> {
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
-        while self.matches(&TokenKind::LParen) {
-            let mut arguments = Vec::new();
-            if !self.check(&TokenKind::RParen) {
-                loop {
-                    arguments.push(self.parse_expression()?);
-                    if !self.matches(&TokenKind::Comma) { break; }
+        loop {
+            if self.matches(&TokenKind::LParen) {
+                let mut arguments = Vec::new();
+                if !self.check(&TokenKind::RParen) {
+                    loop {
+                        arguments.push(self.parse_expression()?);
+                        if !self.matches(&TokenKind::Comma) { break; }
+                    }
                 }
+                self.expect_simple(TokenKind::RParen, "expected ')' after function arguments")?;
+                expr = match expr {
+                    Expr::Variable(callee) if callee == "Some" => {
+                        if arguments.len() != 1 { return Err("Some(...) requires exactly one value".into()); }
+                        Expr::Some(Box::new(arguments.remove(0)))
+                    }
+                    Expr::Variable(callee) if callee == "Ok" => {
+                        if arguments.len() != 1 { return Err("Ok(...) requires exactly one value".into()); }
+                        Expr::Ok(Box::new(arguments.remove(0)))
+                    }
+                    Expr::Variable(callee) if callee == "Err" => {
+                        if arguments.len() != 1 { return Err("Err(...) requires exactly one error value".into()); }
+                        Expr::Err(Box::new(arguments.remove(0)))
+                    }
+                    Expr::Variable(callee) if callee == "None" => return Err("None does not take arguments".into()),
+                    Expr::Variable(callee) => Expr::Call { callee, arguments },
+                    _ => return Err(self.error_here("only named functions can be called in Genix v0.1")),
+                };
+            } else if self.matches(&TokenKind::Question) {
+                expr = Expr::Try(Box::new(expr));
+            } else {
+                break;
             }
-            self.expect_simple(TokenKind::RParen, "expected ')' after function arguments")?;
-            expr = match expr {
-                Expr::Variable(callee) => Expr::Call { callee, arguments },
-                _ => return Err(self.error_here("only named functions can be called in Genix v0.1")),
-            };
         }
         Ok(expr)
     }
@@ -282,6 +370,9 @@ impl Parser {
             TokenKind::True => Ok(Expr::Bool(true)),
             TokenKind::False => Ok(Expr::Bool(false)),
             TokenKind::Identifier(name) => {
+                if name == "None" {
+                    return Ok(Expr::None);
+                }
                 let mut qualified = name;
                 while self.matches(&TokenKind::Dot) {
                     let segment = self.expect_identifier("expected identifier after '.'")?;
@@ -368,12 +459,20 @@ mod tests {
     }
 
     #[test]
-    fn parses_namespaced_call() {
-        let source = "fn main() { let result: int = math.add(2, 3); print(result); }";
+    fn parses_option_result_match_and_try() {
+        let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn main() { let x: Result<string,string> = load(); match x { Ok(v) => { print(v); } Err(e) => { print(e); } } }";
         let program = parse(lex(source).unwrap()).unwrap();
-        match &program.functions[0].body[0] {
-            Stmt::Let { value: Expr::Call { callee, .. }, .. } => assert_eq!(callee, "math.add"),
-            _ => panic!("expected namespaced call"),
+        assert_eq!(program.functions[0].return_type, Type::ResultString);
+        assert!(matches!(program.functions[1].body[1], Stmt::Match { .. }));
+    }
+
+    #[test]
+    fn parses_try_postfix() {
+        let source = "fn load() -> Result<string,string> { return Ok(\"yes\"); } fn wrapper() -> Result<string,string> { let x: string = load()?; return Ok(x); } fn main() {}";
+        let program = parse(lex(source).unwrap()).unwrap();
+        match &program.functions[1].body[0] {
+            Stmt::Let { value: Expr::Try(_), .. } => {}
+            _ => panic!("expected try expression"),
         }
     }
 }
