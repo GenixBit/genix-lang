@@ -6,188 +6,192 @@ Genix source files use the **`.gb`** extension.
 
 > Status: **pre-alpha / v0.0.1**. Syntax and APIs are not stable yet.
 
-## Try Genix
+## Create a Genix project
+
+```bash
+gb new hello-genix
+cd hello-genix
+gb run
+```
+
+A project uses this layout:
+
+```text
+hello-genix/
+├── genix.toml
+└── src/
+    └── main.gb
+```
+
+`genix.toml`:
+
+```toml
+[project]
+name = "hello-genix"
+version = "0.1.0"
+entry = "src/main.gb"
+```
+
+`src/main.gb`:
+
+```gb
+fn main() {
+    print("Hello from Genix!");
+}
+```
+
+## Multi-file modules
+
+Genix projects can import `.gb` modules from the entry file's source directory.
+
+```text
+src/
+├── main.gb
+├── math.gb
+└── greeting.gb
+```
+
+`src/math.gb`:
 
 ```gb
 fn add(a: int, b: int) -> int {
     return a + b;
 }
 
-fn greet(name: string) {
+fn twice(value: int) -> int {
+    return add(value, value);
+}
+```
+
+`src/greeting.gb`:
+
+```gb
+fn hello(name: string) {
     print("Hello " + name);
 }
+```
+
+`src/main.gb`:
+
+```gb
+import math;
+import greeting;
 
 fn main() {
-    let total: int = add(10, 20);
-    greet("GenixBit");
-    print(total);
+    let answer: int = math.twice(21);
+    greeting.hello("Genix");
+    print(answer);
 }
 ```
 
-Run it with:
+Run the project:
 
 ```bash
-cargo run -- run examples/functions.gb
+gb run
 ```
 
-Or, after building/installing the `gb` binary:
+Or target a project directory explicitly:
 
 ```bash
-gb run examples/functions.gb
+gb run examples/project
 ```
 
-Validate syntax and types without executing:
+## Developer CLI
 
-```bash
-gb check examples/functions.gb
+```text
+gb new <name>        Create a new Genix project
+gb run [target]      Run a .gb file or project
+gb check [target]    Check syntax, modules, and types
+gb build [project]   Produce a checked frontend build artifact
+gb version           Show the current version
+gb help              Show help
 ```
+
+`gb run` and `gb check` default to the current project when no target is supplied.
+
+`gb build` currently produces `build/genix.frontend`. This proves project loading, module resolution, parsing, and static type checking succeeded. **Native executable generation is not implemented yet** and is the next backend milestone.
 
 ## Compiler pipeline
 
-The current executable pipeline is:
-
 ```text
-.gb source
-    ↓
+Genix project / .gb source
+        ↓
+Project + module loader
+        ↓
 Lexer
-    ↓
-Tokens
-    ↓
+        ↓
 Parser
-    ↓
+        ↓
 AST
-    ↓
+        ↓
 Static Type Checker
-    ↓
+        ↓
 Interpreter
-    ↓
+        ↓
 Program output
 ```
 
 ## What works today
 
-Current language support includes:
+Current support includes:
 
 - `.gb` source files
+- `genix.toml` project manifests
+- `gb new`
+- Project-level `gb run`
+- Project-level `gb check`
+- Frontend `gb build`
+- Multi-file modules with `import module;`
+- Namespaced calls such as `math.add(...)`
+- Internal function calls within imported modules
 - Multiple user-defined functions
 - `fn main()` entry point
-- Function parameters
-- Function calls
+- Function parameters and calls
 - `return`
 - Return types with `->`
-- Explicit types: `int`, `float`, `string`, `bool`
-- Optional variable type annotations
-- Static type checking before execution
-- Function argument and return-value checking
+- Static types: `int`, `float`, `string`, `bool`
+- Type inference and explicit annotations
+- Static argument and return-value checking
 - Guaranteed-return checks for non-void functions
 - Safe `int` → `float` widening
-- Immutable variables with `let`
-- Mutable variables with `mut`
+- Immutable `let` and mutable `mut`
 - Compile-time mutability checks
-- Variable assignment
-- Integers, floats, strings, and booleans
 - Arithmetic: `+`, `-`, `*`, `/`
 - Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Boolean logic: `&&`, `||`, `!`
 - `if` / `else`
 - `while`
 - Lexical block scope
-- Parenthesized expressions
-- Unary negative values
-- String concatenation with `+`
+- String concatenation
 - `print(...)`
-- `//` line comments
-- Lexer/parser/type/runtime diagnostics
-- `gb run`
-- `gb check`
-- `gb version`
+- `//` comments
+- Automated GitHub CI
 
-## Functions
+### Current module limitation
+
+The first module-system version intentionally keeps resolution simple: imports are declared in the project entry file and map to sibling files such as `src/math.gb`. Nested imports inside imported modules are not supported yet.
+
+## Single-file programs
+
+Single `.gb` files still work:
+
+```bash
+gb run examples/functions.gb
+gb check examples/functions.gb
+```
+
+Example:
 
 ```gb
-fn multiply(a: int, b: int) -> int {
-    return a * b;
+fn add(a: int, b: int) -> int {
+    return a + b;
 }
 
 fn main() {
-    let result: int = multiply(6, 7);
-    print(result);
+    let total: int = add(10, 20);
+    print(total);
 }
 ```
-
-Functions without a return type are void functions:
-
-```gb
-fn greet(name: string) {
-    print("Hello " + name);
-}
-```
-
-## Static types
-
-Genix currently supports four value types:
-
-```text
-int
-float
-string
-bool
-```
-
-Variables may infer their type:
-
-```gb
-let age = 25;
-```
-
-or declare it explicitly:
-
-```gb
-let age: int = 25;
-mut score: float = 10;
-```
-
-A mismatch is rejected before execution:
-
-```gb
-let age: int = "twenty";
-```
-
-Example diagnostic:
-
-```text
-Genix error: type error: initializer for 'age' expected int, found string
-```
-
-Genix permits safe widening from `int` to `float`:
-
-```gb
-fn scale(value: float) -> float {
-    return value * 2.0;
-}
-
-fn main() {
-    let result: float = scale(3);
-    print(result);
-}
-```
-
-## Mutability
-
-Variables are immutable by default:
-
-```gb
-let language = "Genix";
-```
-
-Use `mut` when the value must change:
-
-```gb
-mut count: int = 0;
-count = count + 1;
-```
-
-Assigning to a `let` variable is rejected by the static type-checking pass.
 
 ## Examples
 
@@ -196,44 +200,41 @@ examples/
 ├── hello.gb
 ├── basics.gb
 ├── control_flow.gb
-└── functions.gb
+├── functions.gb
+└── project/
+    ├── genix.toml
+    └── src/
+        ├── main.gb
+        ├── math.gb
+        └── greeting.gb
 ```
 
-## Next milestone — Modules and project tooling
+## Next milestone — Native compiler backend
 
-The next major milestone is moving from single-file programs toward real Genix projects:
-
-```gb
-import math;
-import user;
-```
+The next major milestone is moving beyond interpretation and frontend artifacts toward real compilation.
 
 Planned work:
 
-- Modules/imports
-- Multi-file `.gb` projects
-- `genix.toml` project manifest
-- `gb new`
-- `gb build`
+- Genix intermediate representation (IR)
+- `gb build` native executable output
+- LLVM or another native backend
+- Debug/release build modes
+- Target triples
+- Better source-span diagnostics
+- Runtime integration
+
+After the backend foundation, work can expand into:
+
 - `gb test`
 - `gb fmt`
-- Better source diagnostics
-- Foundation for packages
-
-## Later milestones
-
-- Native code generation
-- Memory-safety model
-- Concurrency / async
+- Package management
 - Standard library integration
-- Web/backend APIs
+- Concurrency / async
+- Memory-safety model
 - AI-native primitives
-- Package registry
 - Language server and editor tooling
 
 ## Repository scope
-
-This is the flagship Genix language repository and contains the compiler/interpreter frontend and early developer tooling.
 
 ```text
 src/
@@ -242,6 +243,7 @@ src/
 ├── parser.rs
 ├── typechecker.rs
 ├── interpreter.rs
+├── project.rs
 └── main.rs
 ```
 
@@ -265,19 +267,17 @@ src/
 
 ## Development
 
-The initial implementation is written in **Rust**. The current execution engine is an interpreter, allowing syntax and semantics to mature before native code generation is introduced.
-
-Run checks locally with:
+The implementation is written in **Rust**. Run the current checks with:
 
 ```bash
 cargo check
 cargo test
-cargo run -- run examples/hello.gb
-cargo run -- run examples/control_flow.gb
 cargo run -- run examples/functions.gb
+cargo run -- run examples/project
+cargo run -- build examples/project
 ```
 
-GitHub Actions runs compiler checks, tests, and executable Genix examples on pushes and pull requests.
+GitHub Actions validates the compiler, language tests, single-file examples, module project execution, project builds, and `gb new` smoke tests on pushes and pull requests.
 
 ## Project status
 
