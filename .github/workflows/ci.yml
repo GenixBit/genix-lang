@@ -31,3 +31,6 @@ jobs:
 
       - name: Run control-flow example
         run: cargo run -- run examples/control_flow.gb
+
+      - name: Run typed-functions example
+        run: cargo run -- run examples/functions.gb
