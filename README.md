@@ -1,20 +1,28 @@
 # Genix
 
-**Genix** is a modern programming language by **GenixBit**, designed for expressive application development, AI-native software, backend services, automation, and high-performance tooling.
+**Genix** is a modern programming language by **GenixBit**. Genix source files use the **`.gb`** extension.
 
-Genix source files use the **`.gb`** extension.
+> Status: **pre-alpha / v0.0.1**. Syntax, runtime behavior, and compiler interfaces may change.
 
-> Status: **pre-alpha / v0.0.1**. Syntax and APIs are not stable yet.
-
-## Create a Genix project
+## Create, run, and compile a Genix project
 
 ```bash
 gb new hello-genix
 cd hello-genix
 gb run
+gb check
+gb build
+./build/hello-genix
 ```
 
-A project uses this layout:
+Release build:
+
+```bash
+gb build --release
+./build/hello-genix
+```
+
+A project uses:
 
 ```text
 hello-genix/
@@ -40,81 +48,14 @@ fn main() {
 }
 ```
 
-## Multi-file modules
+## Native compilation
 
-Genix projects can import `.gb` modules from the entry file's source directory.
+`gb build` now produces a **real host-native executable**.
 
-```text
-src/
-├── main.gb
-├── math.gb
-└── greeting.gb
-```
-
-`src/math.gb`:
-
-```gb
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-
-fn twice(value: int) -> int {
-    return add(value, value);
-}
-```
-
-`src/greeting.gb`:
-
-```gb
-fn hello(name: string) {
-    print("Hello " + name);
-}
-```
-
-`src/main.gb`:
-
-```gb
-import math;
-import greeting;
-
-fn main() {
-    let answer: int = math.twice(21);
-    greeting.hello("Genix");
-    print(answer);
-}
-```
-
-Run the project:
-
-```bash
-gb run
-```
-
-Or target a project directory explicitly:
-
-```bash
-gb run examples/project
-```
-
-## Developer CLI
+Current backend pipeline:
 
 ```text
-gb new <name>        Create a new Genix project
-gb run [target]      Run a .gb file or project
-gb check [target]    Check syntax, modules, and types
-gb build [project]   Produce a checked frontend build artifact
-gb version           Show the current version
-gb help              Show help
-```
-
-`gb run` and `gb check` default to the current project when no target is supplied.
-
-`gb build` currently produces `build/genix.frontend`. This proves project loading, module resolution, parsing, and static type checking succeeded. **Native executable generation is not implemented yet** and is the next backend milestone.
-
-## Compiler pipeline
-
-```text
-Genix project / .gb source
+Genix project / .gb files
         ↓
 Project + module loader
         ↓
@@ -126,33 +67,104 @@ AST
         ↓
 Static Type Checker
         ↓
-Interpreter
+Genix C11 Backend
         ↓
-Program output
+Generated C source
+        ↓
+System C compiler
+        ↓
+Native executable
 ```
 
-## What works today
+Example output:
+
+```text
+build/
+├── hello-genix.c
+└── hello-genix
+```
+
+The backend currently looks for the `CC` environment variable and then `cc`, `clang`, or `gcc`.
+
+Debug builds use `-O0 -g`:
+
+```bash
+gb build
+```
+
+Release builds use `-O2`:
+
+```bash
+gb build --release
+```
+
+The C11 backend is the first native backend. It gives Genix a working native compilation path while the compiler architecture evolves toward a dedicated IR and additional backends such as LLVM.
+
+## Multi-file modules
+
+```text
+src/
+├── main.gb
+├── math.gb
+└── greeting.gb
+```
+
+`math.gb`:
+
+```gb
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn twice(value: int) -> int {
+    return add(value, value);
+}
+```
+
+`main.gb`:
+
+```gb
+import math;
+
+fn main() {
+    let answer: int = math.twice(21);
+    print(answer);
+}
+```
+
+Imported functions are accessed through namespaces such as `math.twice(...)`. Internal calls within a module are automatically resolved to that module namespace.
+
+## Developer CLI
+
+```text
+gb new <name>                  Create a new Genix project
+gb run [target]                Run a .gb file or project through the interpreter
+gb check [target]              Check syntax, modules, and static types
+gb build [project] [--release] Build a native executable
+gb version                     Show the current version
+gb help                        Show help
+```
+
+`gb run` and `gb check` default to the current project when no target is supplied.
+
+## Language features implemented
 
 Current support includes:
 
 - `.gb` source files
-- `genix.toml` project manifests
-- `gb new`
-- Project-level `gb run`
-- Project-level `gb check`
-- Frontend `gb build`
+- `genix.toml` projects
+- `gb new`, `gb run`, `gb check`, and native `gb build`
+- Debug and release native builds
+- C11 native backend
 - Multi-file modules with `import module;`
 - Namespaced calls such as `math.add(...)`
-- Internal function calls within imported modules
 - Multiple user-defined functions
-- `fn main()` entry point
-- Function parameters and calls
+- Typed parameters and return values
 - `return`
-- Return types with `->`
 - Static types: `int`, `float`, `string`, `bool`
 - Type inference and explicit annotations
-- Static argument and return-value checking
-- Guaranteed-return checks for non-void functions
+- Static function argument and return checking
+- Guaranteed-return checking
 - Safe `int` → `float` widening
 - Immutable `let` and mutable `mut`
 - Compile-time mutability checks
@@ -165,76 +177,45 @@ Current support includes:
 - String concatenation
 - `print(...)`
 - `//` comments
-- Automated GitHub CI
+- Automated CI that builds and executes native Genix binaries
 
-### Current module limitation
+## Native type mapping
 
-The first module-system version intentionally keeps resolution simple: imports are declared in the project entry file and map to sibling files such as `src/math.gb`. Nested imports inside imported modules are not supported yet.
+The first C11 backend maps Genix values to native C representations:
 
-## Single-file programs
+| Genix | C11 backend |
+|---|---|
+| `int` | `int64_t` |
+| `float` | `double` |
+| `bool` | `bool` |
+| `string` | `const char*` |
+| void function | `void` |
 
-Single `.gb` files still work:
+The generated runtime currently provides string concatenation and basic runtime failure handling.
+
+## Current backend limitations
+
+This is a bootstrap native compiler, not the final backend architecture.
+
+- Native builds currently target the host platform only.
+- A C compiler (`cc`, `clang`, or `gcc`) is required.
+- Cross-compilation and target triples are not implemented yet.
+- The generated string runtime is intentionally minimal; full ownership/lifetime memory management is still to be designed.
+- Nested imports inside imported modules are not supported yet.
+- Package/registry imports are not implemented yet.
+
+## Single-file development
+
+Single files can still be interpreted and checked directly:
 
 ```bash
 gb run examples/functions.gb
 gb check examples/functions.gb
 ```
 
-Example:
+Native `gb build` operates on projects with `genix.toml` so builds have a stable project name, entry point, and output directory.
 
-```gb
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-
-fn main() {
-    let total: int = add(10, 20);
-    print(total);
-}
-```
-
-## Examples
-
-```text
-examples/
-├── hello.gb
-├── basics.gb
-├── control_flow.gb
-├── functions.gb
-└── project/
-    ├── genix.toml
-    └── src/
-        ├── main.gb
-        ├── math.gb
-        └── greeting.gb
-```
-
-## Next milestone — Native compiler backend
-
-The next major milestone is moving beyond interpretation and frontend artifacts toward real compilation.
-
-Planned work:
-
-- Genix intermediate representation (IR)
-- `gb build` native executable output
-- LLVM or another native backend
-- Debug/release build modes
-- Target triples
-- Better source-span diagnostics
-- Runtime integration
-
-After the backend foundation, work can expand into:
-
-- `gb test`
-- `gb fmt`
-- Package management
-- Standard library integration
-- Concurrency / async
-- Memory-safety model
-- AI-native primitives
-- Language server and editor tooling
-
-## Repository scope
+## Repository architecture
 
 ```text
 src/
@@ -244,8 +225,27 @@ src/
 ├── typechecker.rs
 ├── interpreter.rs
 ├── project.rs
+├── codegen.rs
 └── main.rs
 ```
+
+## Next compiler milestones
+
+The next compiler work should build on the now-working native path:
+
+- Genix IR between type checking and backend generation
+- Target triples and cross-compilation
+- Separate runtime integration through `genix-runtime`
+- Better source-span diagnostics
+- `gb test`
+- `gb fmt`
+- Standard-library integration
+- Package management and lockfiles
+- Memory-safety / ownership model
+- Concurrency / async
+- LLVM backend
+- Language server and editor tooling
+- AI-native standard APIs
 
 ## Ecosystem
 
@@ -263,21 +263,22 @@ src/
 | Company | GenixBit |
 | Source extension | `.gb` |
 | CLI | `gb` |
-| Compiler | `gbc` (planned native compiler) |
+| Compiler | `gbc` (planned standalone compiler identity) |
 
 ## Development
 
-The implementation is written in **Rust**. Run the current checks with:
+The compiler is implemented in **Rust**.
 
 ```bash
 cargo check
 cargo test
-cargo run -- run examples/functions.gb
 cargo run -- run examples/project
 cargo run -- build examples/project
+./examples/project/build/module-demo
+cargo run -- build examples/project --release
 ```
 
-GitHub Actions validates the compiler, language tests, single-file examples, module project execution, project builds, and `gb new` smoke tests on pushes and pull requests.
+GitHub Actions validates the Rust compiler, interpreter, modules, static type checker, project generator, native debug build, native release build, and execution of generated native binaries.
 
 ## Project status
 
