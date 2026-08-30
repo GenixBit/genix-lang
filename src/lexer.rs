@@ -1,3 +1,5 @@
+use crate::diagnostics::{Diagnostic, Span};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Fn,
@@ -47,9 +49,16 @@ pub struct Token {
     pub kind: TokenKind,
     pub line: usize,
     pub column: usize,
+    pub width: usize,
 }
 
-pub fn lex(source: &str) -> Result<Vec<Token>, String> {
+impl Token {
+    pub fn span(&self) -> Span {
+        Span::single(self.line, self.column, self.width)
+    }
+}
+
+pub fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0;
@@ -103,6 +112,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
             '"' => {
                 let start_line = line;
                 let start_column = column;
+                let start = i;
                 i += 1;
                 column += 1;
                 let mut value = String::new();
@@ -122,7 +132,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                             i += 2;
                             column += 2;
                         }
-                        '\n' => return Err(format!("unterminated string at {start_line}:{start_column}")),
+                        '\n' => {
+                            return Err(
+                                Diagnostic::new("E0002", "unterminated string literal")
+                                    .with_label("string starts here")
+                                    .with_help("close the string with a double quote before the end of the line")
+                                    .with_location("<memory>", Span::single(start_line, start_column, 1)),
+                            )
+                        }
                         c => {
                             value.push(c);
                             i += 1;
@@ -132,7 +149,12 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 }
 
                 if i >= chars.len() {
-                    return Err(format!("unterminated string at {start_line}:{start_column}"));
+                    return Err(
+                        Diagnostic::new("E0002", "unterminated string literal")
+                            .with_label("string starts here")
+                            .with_help("add a closing double quote")
+                            .with_location("<memory>", Span::single(start_line, start_column, 1)),
+                    );
                 }
 
                 i += 1;
@@ -141,6 +163,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                     kind: TokenKind::String(value),
                     line: start_line,
                     column: start_column,
+                    width: i - start,
                 });
             }
             c if c.is_ascii_digit() => {
@@ -162,13 +185,22 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                 }
 
                 let text: String = chars[start..i].iter().collect();
+                let width = i - start;
                 let kind = if has_dot {
-                    TokenKind::Float(text.parse().map_err(|_| format!("invalid float '{text}' at {line}:{start_column}"))?)
+                    TokenKind::Float(text.parse().map_err(|_| {
+                        Diagnostic::new("E0003", format!("invalid float literal '{text}'"))
+                            .with_label("invalid number")
+                            .with_location("<memory>", Span::single(line, start_column, width))
+                    })?)
                 } else {
-                    TokenKind::Integer(text.parse().map_err(|_| format!("invalid integer '{text}' at {line}:{start_column}"))?)
+                    TokenKind::Integer(text.parse().map_err(|_| {
+                        Diagnostic::new("E0003", format!("invalid integer literal '{text}'"))
+                            .with_label("invalid number")
+                            .with_location("<memory>", Span::single(line, start_column, width))
+                    })?)
                 };
 
-                tokens.push(Token { kind, line, column: start_column });
+                tokens.push(Token { kind, line, column: start_column, width });
             }
             c if is_identifier_start(c) => {
                 let start = i;
@@ -196,15 +228,35 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                     _ => TokenKind::Identifier(text),
                 };
 
-                tokens.push(Token { kind, line, column: start_column });
+                tokens.push(Token { kind, line, column: start_column, width: i - start });
             }
-            '&' => return Err(format!("unexpected '&' at {line}:{column}; use '&&' for logical and")),
-            '|' => return Err(format!("unexpected '|' at {line}:{column}; use '||' for logical or")),
-            other => return Err(format!("unexpected character '{other}' at {line}:{column}")),
+            '&' => {
+                return Err(
+                    Diagnostic::new("E0001", "unexpected '&'")
+                        .with_label("single '&' is not a Genix operator")
+                        .with_help("use '&&' for logical and")
+                        .with_location("<memory>", Span::single(line, column, 1)),
+                )
+            }
+            '|' => {
+                return Err(
+                    Diagnostic::new("E0001", "unexpected '|'")
+                        .with_label("single '|' is not a Genix operator")
+                        .with_help("use '||' for logical or")
+                        .with_location("<memory>", Span::single(line, column, 1)),
+                )
+            }
+            other => {
+                return Err(
+                    Diagnostic::new("E0001", format!("unexpected character '{other}'"))
+                        .with_label("not valid Genix syntax")
+                        .with_location("<memory>", Span::single(line, column, 1)),
+                )
+            }
         }
     }
 
-    tokens.push(Token { kind: TokenKind::Eof, line, column });
+    tokens.push(Token { kind: TokenKind::Eof, line, column, width: 1 });
     Ok(tokens)
 }
 
@@ -213,13 +265,13 @@ fn matches_next(chars: &[char], i: usize, expected: char) -> bool {
 }
 
 fn push_simple(tokens: &mut Vec<Token>, kind: TokenKind, line: usize, column: usize, i: &mut usize, current_column: &mut usize) {
-    tokens.push(Token { kind, line, column });
+    tokens.push(Token { kind, line, column, width: 1 });
     *i += 1;
     *current_column += 1;
 }
 
 fn push_double(tokens: &mut Vec<Token>, kind: TokenKind, line: usize, column: usize, i: &mut usize, current_column: &mut usize) {
-    tokens.push(Token { kind, line, column });
+    tokens.push(Token { kind, line, column, width: 2 });
     *i += 2;
     *current_column += 2;
 }
@@ -245,6 +297,14 @@ mod tests {
     }
 
     #[test]
+    fn records_token_widths() {
+        let tokens = lex("let answer = 42;").unwrap();
+        assert_eq!(tokens[0].width, 3);
+        assert_eq!(tokens[1].width, 6);
+        assert_eq!(tokens[3].width, 2);
+    }
+
+    #[test]
     fn lexes_function_types_and_return() {
         let tokens = lex("fn add(a: int, b: int) -> int { return a + b; }").unwrap();
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Colon)));
@@ -259,5 +319,12 @@ mod tests {
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Match)));
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::FatArrow)));
         assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Question)));
+    }
+
+    #[test]
+    fn reports_structured_lex_errors() {
+        let error = lex("fn main() { @ }").unwrap_err();
+        assert_eq!(error.code, "E0001");
+        assert_eq!(error.span.unwrap().line, 1);
     }
 }
