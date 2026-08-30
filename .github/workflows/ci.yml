@@ -28,3 +28,6 @@ jobs:
 
       - name: Validate basics example
         run: cargo run -- check examples/basics.gb
+
+      - name: Run control-flow example
+        run: cargo run -- run examples/control_flow.gb
