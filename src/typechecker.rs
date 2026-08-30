@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::{BinaryOp, Expr, Function, Program, Stmt, Type, UnaryOp};
+use crate::ast::{BinaryOp, Expr, Function, MatchArm, Pattern, Program, Stmt, Type, UnaryOp};
 
 #[derive(Debug, Clone)]
 struct Signature {
@@ -35,12 +35,10 @@ pub fn check(program: &Program) -> Result<(), String> {
 
 fn collect_signatures(program: &Program) -> Result<HashMap<String, Signature>, String> {
     let mut signatures = HashMap::new();
-
     for function in &program.functions {
         if signatures.contains_key(&function.name) {
             return Err(format!("type error: function '{}' is defined more than once", function.name));
         }
-
         signatures.insert(
             function.name.clone(),
             Signature {
@@ -49,7 +47,6 @@ fn collect_signatures(program: &Program) -> Result<HashMap<String, Signature>, S
             },
         );
     }
-
     Ok(signatures)
 }
 
@@ -57,14 +54,12 @@ fn validate_main(signatures: &HashMap<String, Signature>) -> Result<(), String> 
     let Some(main) = signatures.get("main") else {
         return Err("type error: Genix program must define fn main()".into());
     };
-
     if !main.params.is_empty() {
         return Err("type error: fn main() cannot take parameters in Genix v0.1".into());
     }
     if main.return_type != Type::Void {
         return Err("type error: fn main() cannot declare a return value in Genix v0.1".into());
     }
-
     Ok(())
 }
 
@@ -91,7 +86,6 @@ impl<'a> Checker<'a> {
                     function.name, param.name
                 ));
             }
-
             let scope = self.scopes.last_mut().expect("checker always has a scope");
             if scope.contains_key(&param.name) {
                 return Err(format!(
@@ -116,13 +110,9 @@ impl<'a> Checker<'a> {
 
     fn check_statement(&mut self, statement: &Stmt) -> Result<(), String> {
         match statement {
-            Stmt::Let {
-                name,
-                value,
-                mutable,
-                annotation,
-            } => {
-                let actual = self.expression_type(value)?;
+            Stmt::Let { name, value, mutable, annotation } => {
+                self.ensure_try_position(value, true, "variable initializer")?;
+                let actual = self.expression_type_expected(value, *annotation)?;
                 if actual == Type::Void {
                     return Err(format!("type error: variable '{name}' cannot store a void value"));
                 }
@@ -141,37 +131,36 @@ impl<'a> Checker<'a> {
                 if scope.contains_key(name) {
                     return Err(format!("type error: variable '{name}' is already declared in this scope"));
                 }
-                scope.insert(
-                    name.clone(),
-                    BindingInfo {
-                        ty,
-                        mutable: *mutable,
-                    },
-                );
+                scope.insert(name.clone(), BindingInfo { ty, mutable: *mutable });
                 Ok(())
             }
             Stmt::Assign { name, value } => {
-                let binding = self
-                    .lookup(name)
+                self.ensure_try_position(value, true, "assignment")?;
+                let binding = self.lookup(name)
                     .ok_or_else(|| format!("type error: undefined variable '{name}'"))?;
                 if !binding.mutable {
                     return Err(format!(
                         "type error: cannot assign to immutable variable '{name}'; declare it with 'mut'"
                     ));
                 }
-                let actual = self.expression_type(value)?;
+                let actual = self.expression_type_expected(value, Some(binding.ty))?;
                 self.require_compatible(binding.ty, actual, &format!("assignment to '{name}'"))
             }
             Stmt::Print(expr) => {
+                self.ensure_try_position(expr, false, "print argument")?;
                 let ty = self.expression_type(expr)?;
-                if ty == Type::Void {
-                    Err("type error: print() cannot print a void value".into())
-                } else {
-                    Ok(())
+                match ty {
+                    Type::Void => Err("type error: print() cannot print a void value".into()),
+                    Type::OptionInt | Type::OptionFloat | Type::OptionBool | Type::OptionString
+                    | Type::ResultInt | Type::ResultFloat | Type::ResultBool | Type::ResultString => {
+                        Err(format!("type error: print() cannot directly print {ty}; use match to unwrap it"))
+                    }
+                    _ => Ok(()),
                 }
             }
             Stmt::Expr(expr) => {
-                if !matches!(expr, Expr::Call { .. }) {
+                self.ensure_try_position(expr, true, "expression statement")?;
+                if !matches!(expr, Expr::Call { .. } | Expr::Try(_)) {
                     return Err("type error: only function calls can be expression statements".into());
                 }
                 self.expression_type(expr)?;
@@ -182,16 +171,15 @@ impl<'a> Checker<'a> {
                 (Type::Void, Some(_)) => Err("type error: void function cannot return a value".into()),
                 (expected, None) => Err(format!("type error: expected return value of type {expected}")),
                 (expected, Some(expr)) => {
-                    let actual = self.expression_type(expr)?;
+                    self.ensure_try_position(expr, false, "return value")?;
+                    let actual = self.expression_type_expected(expr, Some(expected))?;
                     self.require_compatible(expected, actual, "return value")
                 }
             },
-            Stmt::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.require_exact(Type::Bool, self.expression_type(condition)?, "if condition")?;
+            Stmt::If { condition, then_branch, else_branch } => {
+                self.ensure_try_position(condition, false, "if condition")?;
+                let condition_ty = self.expression_type(condition)?;
+                self.require_exact(Type::Bool, condition_ty, "if condition")?;
                 self.check_block(then_branch)?;
                 if let Some(else_branch) = else_branch {
                     self.check_block(else_branch)?;
@@ -199,11 +187,76 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             Stmt::While { condition, body } => {
-                self.require_exact(Type::Bool, self.expression_type(condition)?, "while condition")?;
+                self.ensure_try_position(condition, false, "while condition")?;
+                let condition_ty = self.expression_type(condition)?;
+                self.require_exact(Type::Bool, condition_ty, "while condition")?;
                 self.check_block(body)
             }
+            Stmt::Match { value, arms } => self.check_match(value, arms),
             Stmt::Block(body) => self.check_block(body),
         }
+    }
+
+    fn check_match(&mut self, value: &Expr, arms: &[MatchArm]) -> Result<(), String> {
+        self.ensure_try_position(value, false, "match value")?;
+        let ty = self.expression_type(value)?;
+        let mut first_seen = false;
+        let mut second_seen = false;
+
+        for arm in arms {
+            let binding = match (&arm.pattern, ty) {
+                (Pattern::Some(name), option) if option.option_inner().is_some() => {
+                    if first_seen { return Err("type error: duplicate Some match arm".into()); }
+                    first_seen = true;
+                    Some((name.as_str(), option.option_inner().unwrap()))
+                }
+                (Pattern::None, option) if option.option_inner().is_some() => {
+                    if second_seen { return Err("type error: duplicate None match arm".into()); }
+                    second_seen = true;
+                    None
+                }
+                (Pattern::Ok(name), result) if result.result_ok().is_some() => {
+                    if first_seen { return Err("type error: duplicate Ok match arm".into()); }
+                    first_seen = true;
+                    Some((name.as_str(), result.result_ok().unwrap()))
+                }
+                (Pattern::Err(name), result) if result.result_ok().is_some() => {
+                    if second_seen { return Err("type error: duplicate Err match arm".into()); }
+                    second_seen = true;
+                    Some((name.as_str(), Type::String))
+                }
+                (pattern, _) => {
+                    return Err(format!("type error: pattern {pattern:?} is not valid for matched value of type {ty}"))
+                }
+            };
+
+            self.scopes.push(HashMap::new());
+            if let Some((name, binding_ty)) = binding {
+                self.scopes.last_mut().unwrap().insert(
+                    name.to_string(),
+                    BindingInfo { ty: binding_ty, mutable: false },
+                );
+            }
+            let result = (|| {
+                for statement in &arm.body {
+                    self.check_statement(statement)?;
+                }
+                Ok(())
+            })();
+            self.scopes.pop();
+            result?;
+        }
+
+        if ty.option_inner().is_some() && !(first_seen && second_seen) {
+            return Err("type error: Option match must handle both Some(...) and None".into());
+        }
+        if ty.result_ok().is_some() && !(first_seen && second_seen) {
+            return Err("type error: Result match must handle both Ok(...) and Err(...)".into());
+        }
+        if ty.option_inner().is_none() && ty.result_ok().is_none() {
+            return Err(format!("type error: match currently supports Option and Result, found {ty}"));
+        }
+        Ok(())
     }
 
     fn check_block(&mut self, body: &[Stmt]) -> Result<(), String> {
@@ -219,40 +272,82 @@ impl<'a> Checker<'a> {
     }
 
     fn expression_type(&self, expr: &Expr) -> Result<Type, String> {
+        self.expression_type_expected(expr, None)
+    }
+
+    fn expression_type_expected(&self, expr: &Expr, expected: Option<Type>) -> Result<Type, String> {
         match expr {
             Expr::Integer(_) => Ok(Type::Int),
             Expr::Float(_) => Ok(Type::Float),
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::String(_) => Ok(Type::String),
-            Expr::Variable(name) => self
-                .lookup(name)
+            Expr::Variable(name) => self.lookup(name)
                 .map(|binding| binding.ty)
                 .ok_or_else(|| format!("type error: undefined variable '{name}'")),
             Expr::Call { callee, arguments } => {
-                let signature = self
-                    .signatures
-                    .get(callee)
-                    .cloned()
+                let signature = self.signatures.get(callee).cloned()
                     .ok_or_else(|| format!("type error: undefined function '{callee}'"))?;
-
                 if arguments.len() != signature.params.len() {
                     return Err(format!(
                         "type error: function '{callee}' expects {} argument(s), found {}",
-                        signature.params.len(),
-                        arguments.len()
+                        signature.params.len(), arguments.len()
                     ));
                 }
-
-                for (index, (argument, expected)) in arguments.iter().zip(signature.params.iter()).enumerate() {
-                    let actual = self.expression_type(argument)?;
+                for (index, (argument, expected_param)) in arguments.iter().zip(signature.params.iter()).enumerate() {
+                    let actual = self.expression_type_expected(argument, Some(*expected_param))?;
                     self.require_compatible(
-                        *expected,
+                        *expected_param,
                         actual,
                         &format!("argument {} for function '{callee}'", index + 1),
                     )?;
                 }
-
                 Ok(signature.return_type)
+            }
+            Expr::Some(value) => {
+                if let Some(expected_option) = expected.filter(|ty| ty.option_inner().is_some()) {
+                    let inner_expected = expected_option.option_inner().unwrap();
+                    let actual = self.expression_type_expected(value, Some(inner_expected))?;
+                    self.require_compatible(inner_expected, actual, "Some value")?;
+                    Ok(expected_option)
+                } else {
+                    let inner = self.expression_type(value)?;
+                    Type::option(inner).ok_or_else(|| format!("type error: Some({inner}) is not supported in Genix v0.1"))
+                }
+            }
+            Expr::None => expected
+                .filter(|ty| ty.option_inner().is_some())
+                .ok_or_else(|| "type error: None requires an Option<T> type annotation or return context".to_string()),
+            Expr::Ok(value) => {
+                if let Some(expected_result) = expected.filter(|ty| ty.result_ok().is_some()) {
+                    let ok_expected = expected_result.result_ok().unwrap();
+                    let actual = self.expression_type_expected(value, Some(ok_expected))?;
+                    self.require_compatible(ok_expected, actual, "Ok value")?;
+                    Ok(expected_result)
+                } else {
+                    let ok = self.expression_type(value)?;
+                    Type::result(ok, Type::String)
+                        .ok_or_else(|| format!("type error: Ok({ok}) is not supported in Genix v0.1"))
+                }
+            }
+            Expr::Err(error) => {
+                let error_ty = self.expression_type_expected(error, Some(Type::String))?;
+                self.require_exact(Type::String, error_ty, "Err value")?;
+                expected
+                    .filter(|ty| ty.result_ok().is_some())
+                    .ok_or_else(|| "type error: Err(...) requires a Result<T,string> type annotation or return context".to_string())
+            }
+            Expr::Try(inner) => {
+                let result_ty = self.expression_type(inner)?;
+                let Some(ok_ty) = result_ty.result_ok() else {
+                    return Err(format!("type error: '?' requires Result<T,string>, found {result_ty}"));
+                };
+                if !self.return_type.is_result() {
+                    return Err(format!(
+                        "type error: '?' can only be used inside a function returning Result<T,string>; current return type is {}",
+                        self.return_type
+                    ));
+                }
+                Ok(ok_ty)
             }
             Expr::Unary { op, expr } => {
                 let ty = self.expression_type(expr)?;
@@ -284,12 +379,10 @@ impl<'a> Checker<'a> {
             BinaryOp::Multiply => numeric_result(left, right, "*"),
             BinaryOp::Divide => numeric_result(left, right, "/"),
             BinaryOp::Equal | BinaryOp::NotEqual => {
-                if left == right || (is_numeric(left) && is_numeric(right)) {
+                if left == right && is_plain_value(left) || (is_numeric(left) && is_numeric(right)) {
                     Ok(Type::Bool)
                 } else {
-                    Err(format!(
-                        "type error: equality comparison requires compatible types, found {left} and {right}"
-                    ))
+                    Err(format!("type error: equality comparison requires compatible primitive types, found {left} and {right}"))
                 }
             }
             BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
@@ -309,11 +402,17 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn ensure_try_position(&self, expr: &Expr, allow_root: bool, context: &str) -> Result<(), String> {
+        if contains_try(expr) && !(allow_root && matches!(expr, Expr::Try(_))) {
+            return Err(format!(
+                "type error: '?' is currently supported only as the complete value of a variable initializer, assignment, or call statement; not inside {context}"
+            ));
+        }
+        Ok(())
+    }
+
     fn lookup(&self, name: &str) -> Option<BindingInfo> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).copied())
     }
 
     fn require_compatible(&self, expected: Type, actual: Type, context: &str) -> Result<(), String> {
@@ -333,12 +432,26 @@ impl<'a> Checker<'a> {
     }
 }
 
+fn contains_try(expr: &Expr) -> bool {
+    match expr {
+        Expr::Try(_) => true,
+        Expr::Some(value) | Expr::Ok(value) | Expr::Err(value) | Expr::Unary { expr: value, .. } => contains_try(value),
+        Expr::Call { arguments, .. } => arguments.iter().any(contains_try),
+        Expr::Binary { left, right, .. } => contains_try(left) || contains_try(right),
+        Expr::Integer(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Variable(_) | Expr::None => false,
+    }
+}
+
 fn compatible(expected: Type, actual: Type) -> bool {
     expected == actual || (expected == Type::Float && actual == Type::Int)
 }
 
 fn is_numeric(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::Float)
+}
+
+fn is_plain_value(ty: Type) -> bool {
+    matches!(ty, Type::Int | Type::Float | Type::Bool | Type::String)
 }
 
 fn numeric_result(left: Type, right: Type, operator: &str) -> Result<Type, String> {
@@ -367,11 +480,10 @@ fn statement_definitely_returns(statement: &Stmt) -> bool {
     match statement {
         Stmt::Return(_) => true,
         Stmt::Block(body) => block_definitely_returns(body),
-        Stmt::If {
-            then_branch,
-            else_branch: Some(else_branch),
-            ..
-        } => block_definitely_returns(then_branch) && block_definitely_returns(else_branch),
+        Stmt::If { then_branch, else_branch: Some(else_branch), .. } => {
+            block_definitely_returns(then_branch) && block_definitely_returns(else_branch)
+        }
+        Stmt::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|arm| block_definitely_returns(&arm.body)),
         _ => false,
     }
 }
@@ -392,29 +504,34 @@ mod tests {
     }
 
     #[test]
-    fn allows_int_to_float_widening() {
-        let source = "fn scale(x: float) -> float { return x * 2.0; } fn main() { let result: float = scale(3); print(result); }";
+    fn accepts_option_and_exhaustive_match() {
+        let source = "fn find() -> Option<string> { return Some(\"Genix\"); } fn main() { let x: Option<string> = find(); match x { Some(v) => { print(v); } None => { print(\"missing\"); } } }";
         assert!(check_source(source).is_ok());
     }
 
     #[test]
-    fn rejects_wrong_variable_type() {
-        let source = "fn main() { let age: int = \"twenty\"; }";
-        let error = check_source(source).unwrap_err();
-        assert!(error.contains("expected int, found string"));
+    fn accepts_result_and_try_propagation() {
+        let source = "fn load() -> Result<string,string> { return Ok(\"data\"); } fn wrapper() -> Result<string,string> { let text: string = load()?; return Ok(text); } fn main() { let value: Result<string,string> = wrapper(); match value { Ok(v) => { print(v); } Err(e) => { print(e); } } }";
+        assert!(check_source(source).is_ok());
     }
 
     #[test]
-    fn rejects_wrong_argument_type() {
-        let source = "fn add(a: int, b: int) -> int { return a + b; } fn main() { print(add(1, \"two\")); }";
+    fn rejects_non_exhaustive_match() {
+        let source = "fn find() -> Option<string> { return None; } fn main() { let x: Option<string> = find(); match x { Some(v) => { print(v); } } }";
         let error = check_source(source).unwrap_err();
-        assert!(error.contains("argument 2"));
+        assert!(error.contains("both Some") || error.contains("Option match"));
     }
 
     #[test]
-    fn requires_guaranteed_return() {
-        let source = "fn positive(x: int) -> int { if x > 0 { return x; } } fn main() {}";
+    fn rejects_try_outside_result_function() {
+        let source = "fn load() -> Result<string,string> { return Ok(\"data\"); } fn main() { let text: string = load()?; print(text); }";
         let error = check_source(source).unwrap_err();
-        assert!(error.contains("guaranteed return"));
+        assert!(error.contains("function returning Result"));
+    }
+
+    #[test]
+    fn allows_int_to_float_widening() {
+        let source = "fn scale(x: float) -> float { return x * 2.0; } fn main() { let result: float = scale(3); print(result); }";
+        assert!(check_source(source).is_ok());
     }
 }
