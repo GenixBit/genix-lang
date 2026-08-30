@@ -9,47 +9,42 @@ Genix source files use the **`.gb`** extension.
 ## Try Genix
 
 ```gb
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+
+fn greet(name: string) {
+    print("Hello " + name);
+}
+
 fn main() {
-    let company = "GenixBit";
-    mut count = 0;
-
-    while count < 5 {
-        count = count + 1;
-
-        if count == 3 {
-            print("Genix reached three");
-        } else {
-            print(count);
-        }
-    }
-
-    if count >= 5 && !false {
-        print(company + " control flow works!");
-    }
+    let total: int = add(10, 20);
+    greet("GenixBit");
+    print(total);
 }
 ```
 
 Run it with:
 
 ```bash
-cargo run -- run examples/control_flow.gb
+cargo run -- run examples/functions.gb
 ```
 
-Or, after installing/building the `gb` binary:
+Or, after building/installing the `gb` binary:
 
 ```bash
-gb run examples/control_flow.gb
+gb run examples/functions.gb
 ```
 
-Validate syntax without executing:
+Validate syntax and types without executing:
 
 ```bash
-gb check examples/control_flow.gb
+gb check examples/functions.gb
 ```
 
-## What works today
+## Compiler pipeline
 
-The executable language pipeline is:
+The current executable pipeline is:
 
 ```text
 .gb source
@@ -62,20 +57,35 @@ Parser
     ↓
 AST
     ↓
+Static Type Checker
+    ↓
 Interpreter
     ↓
 Program output
 ```
 
+## What works today
+
 Current language support includes:
 
 - `.gb` source files
+- Multiple user-defined functions
 - `fn main()` entry point
+- Function parameters
+- Function calls
+- `return`
+- Return types with `->`
+- Explicit types: `int`, `float`, `string`, `bool`
+- Optional variable type annotations
+- Static type checking before execution
+- Function argument and return-value checking
+- Guaranteed-return checks for non-void functions
+- Safe `int` → `float` widening
 - Immutable variables with `let`
 - Mutable variables with `mut`
+- Compile-time mutability checks
 - Variable assignment
 - Integers, floats, strings, and booleans
-- Variable references
 - Arithmetic: `+`, `-`, `*`, `/`
 - Comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Boolean logic: `&&`, `||`, `!`
@@ -87,67 +97,130 @@ Current language support includes:
 - String concatenation with `+`
 - `print(...)`
 - `//` line comments
-- Basic lexer/parser/runtime diagnostics
+- Lexer/parser/type/runtime diagnostics
 - `gb run`
 - `gb check`
 - `gb version`
 
+## Functions
+
+```gb
+fn multiply(a: int, b: int) -> int {
+    return a * b;
+}
+
+fn main() {
+    let result: int = multiply(6, 7);
+    print(result);
+}
+```
+
+Functions without a return type are void functions:
+
+```gb
+fn greet(name: string) {
+    print("Hello " + name);
+}
+```
+
+## Static types
+
+Genix currently supports four value types:
+
+```text
+int
+float
+string
+bool
+```
+
+Variables may infer their type:
+
+```gb
+let age = 25;
+```
+
+or declare it explicitly:
+
+```gb
+let age: int = 25;
+mut score: float = 10;
+```
+
+A mismatch is rejected before execution:
+
+```gb
+let age: int = "twenty";
+```
+
+Example diagnostic:
+
+```text
+Genix error: type error: initializer for 'age' expected int, found string
+```
+
+Genix permits safe widening from `int` to `float`:
+
+```gb
+fn scale(value: float) -> float {
+    return value * 2.0;
+}
+
+fn main() {
+    let result: float = scale(3);
+    print(result);
+}
+```
+
 ## Mutability
 
-Genix variables are immutable by default:
+Variables are immutable by default:
 
 ```gb
 let language = "Genix";
 ```
 
-Use `mut` only when a variable needs to change:
+Use `mut` when the value must change:
 
 ```gb
-mut count = 0;
+mut count: int = 0;
 count = count + 1;
 ```
 
-Assigning to a `let` variable produces a runtime error in the current interpreter. Static detection is planned as part of the type-checking milestone.
+Assigning to a `let` variable is rejected by the static type-checking pass.
 
-## Next language milestone — Functions and types
+## Examples
 
-The next major compiler milestone is user-defined functions and static typing:
+```text
+examples/
+├── hello.gb
+├── basics.gb
+├── control_flow.gb
+└── functions.gb
+```
+
+## Next milestone — Modules and project tooling
+
+The next major milestone is moving from single-file programs toward real Genix projects:
 
 ```gb
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
-
-fn main() {
-    let result: int = add(10, 20);
-    print(result);
-}
+import math;
+import user;
 ```
 
 Planned work:
 
-- User-defined functions
-- Parameters
-- Return values
-- `return`
-- Explicit types (`int`, `float`, `string`, `bool`)
-- Function-call expressions
-- Static type checking
-- Compile-time mutability checks
-- Improved diagnostics
-
-## Later milestones
-
-### Modules and tooling
-
-- Imports/modules
-- Project manifests
+- Modules/imports
+- Multi-file `.gb` projects
+- `genix.toml` project manifest
+- `gb new`
 - `gb build`
 - `gb test`
 - `gb fmt`
-- Package foundations
+- Better source diagnostics
+- Foundation for packages
 
-### Native platform
+## Later milestones
 
 - Native code generation
 - Memory-safety model
@@ -167,6 +240,7 @@ src/
 ├── ast.rs
 ├── lexer.rs
 ├── parser.rs
+├── typechecker.rs
 ├── interpreter.rs
 └── main.rs
 ```
@@ -200,6 +274,7 @@ cargo check
 cargo test
 cargo run -- run examples/hello.gb
 cargo run -- run examples/control_flow.gb
+cargo run -- run examples/functions.gb
 ```
 
 GitHub Actions runs compiler checks, tests, and executable Genix examples on pushes and pull requests.
