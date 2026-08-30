@@ -2,8 +2,8 @@ use crate::ast::{BinaryOp, Expr, Function, MatchArm, Param, Pattern, Program, St
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Token, TokenKind};
 
-pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
-    parse_named(tokens, "<memory>")
+pub fn parse(tokens: Vec<Token>) -> Result<Program, String> {
+    parse_named(tokens, "<memory>").map_err(|diagnostic| diagnostic.to_string())
 }
 
 pub fn parse_named(tokens: Vec<Token>, source_name: impl Into<String>) -> Result<Program, Diagnostic> {
@@ -77,7 +77,7 @@ impl Parser {
 
     fn parse_type(&mut self) -> Result<Type, Diagnostic> {
         let token = self.advance().clone();
-        let TokenKind::Identifier(name) = token.kind else {
+        let TokenKind::Identifier(ref name) = token.kind else {
             return Err(
                 self.error_at(&token, "E0101", "expected a Genix type")
                     .with_label("type expected here"),
@@ -266,7 +266,7 @@ impl Parser {
 
     fn parse_pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let token = self.advance().clone();
-        let TokenKind::Identifier(name) = token.kind else {
+        let TokenKind::Identifier(ref name) = token.kind else {
             return Err(
                 self.error_at(&token, "E0103", "expected a match pattern")
                     .with_label("pattern expected here"),
@@ -642,7 +642,8 @@ mod tests {
 
     #[test]
     fn reports_source_aware_syntax_errors() {
-        let error = parse_named(lex("fn main( {").unwrap(), "src/main.gb").unwrap_err();
+        let tokens = crate::lexer::lex_diagnostic("fn main( {").unwrap();
+        let error = parse_named(tokens, "src/main.gb").unwrap_err();
         assert_eq!(error.code, "E0100");
         assert_eq!(error.source_name.as_deref(), Some("src/main.gb"));
         assert!(error.span.is_some());
