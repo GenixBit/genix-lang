@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GENIX_RUNTIME: ${{ github.workspace }}/genix-runtime
+      GENIX_STDLIB: ${{ github.workspace }}/genix-stdlib
 
     steps:
       - name: Checkout compiler
@@ -21,6 +22,12 @@ jobs:
         with:
           repository: GenixBit/genix-runtime
           path: genix-runtime
+
+      - name: Checkout Genix stdlib
+        uses: actions/checkout@v4
+        with:
+          repository: GenixBit/genix-stdlib
+          path: genix-stdlib
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -57,6 +64,21 @@ jobs:
 
       - name: Verify explicit IR widening cast
         run: cargo run -- ir examples/functions.gb | grep 'cast<float>'
+
+      - name: Check standard library project
+        run: cargo run -- check examples/stdlib
+
+      - name: Run standard library project
+        run: cargo run -- run examples/stdlib
+
+      - name: Inspect standard library IR
+        run: cargo run -- ir examples/stdlib | grep 'math.square'
+
+      - name: Build standard library native executable
+        run: cargo run -- build examples/stdlib
+
+      - name: Execute standard library native binary
+        run: ./examples/stdlib/build/stdlib-demo
 
       - name: Build native debug executable with runtime
         run: cargo run -- build examples/project
