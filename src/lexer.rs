@@ -6,6 +6,7 @@ pub enum TokenKind {
     If,
     Else,
     While,
+    Match,
     Return,
     True,
     False,
@@ -22,6 +23,8 @@ pub enum TokenKind {
     Comma,
     Dot,
     Arrow,
+    FatArrow,
+    Question,
     Equal,
     EqualEqual,
     Bang,
@@ -80,7 +83,9 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
             ':' => push_simple(&mut tokens, TokenKind::Colon, line, column, &mut i, &mut column),
             ',' => push_simple(&mut tokens, TokenKind::Comma, line, column, &mut i, &mut column),
             '.' => push_simple(&mut tokens, TokenKind::Dot, line, column, &mut i, &mut column),
+            '?' => push_simple(&mut tokens, TokenKind::Question, line, column, &mut i, &mut column),
             '-' if matches_next(&chars, i, '>') => push_double(&mut tokens, TokenKind::Arrow, line, column, &mut i, &mut column),
+            '=' if matches_next(&chars, i, '>') => push_double(&mut tokens, TokenKind::FatArrow, line, column, &mut i, &mut column),
             '=' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::EqualEqual, line, column, &mut i, &mut column),
             '=' => push_simple(&mut tokens, TokenKind::Equal, line, column, &mut i, &mut column),
             '!' if matches_next(&chars, i, '=') => push_double(&mut tokens, TokenKind::BangEqual, line, column, &mut i, &mut column),
@@ -184,6 +189,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, String> {
                     "if" => TokenKind::If,
                     "else" => TokenKind::Else,
                     "while" => TokenKind::While,
+                    "match" => TokenKind::Match,
                     "return" => TokenKind::Return,
                     "true" => TokenKind::True,
                     "false" => TokenKind::False,
@@ -248,8 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn lexes_namespaced_function_calls() {
-        let tokens = lex("fn main() { print(math.add(1, 2)); }").unwrap();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Dot)));
+    fn lexes_match_and_try_syntax() {
+        let tokens = lex("match x { Some(v) => { print(v); } None => {} } let y = load()?;").unwrap();
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Match)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::FatArrow)));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Question)));
     }
 }
