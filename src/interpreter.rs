@@ -185,7 +185,8 @@ impl Interpreter {
                 then_branch,
                 else_branch,
             } => {
-                if self.expect_bool(self.evaluate(condition)?, "if condition")? {
+                let condition_value = self.evaluate(condition)?;
+                if self.expect_bool(condition_value, "if condition")? {
                     self.execute_block(then_branch)
                 } else if let Some(else_branch) = else_branch {
                     self.execute_block(else_branch)
