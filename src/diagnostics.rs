@@ -76,10 +76,15 @@ impl Diagnostic {
     }
 
     pub fn with_location(mut self, source_name: impl Into<String>, span: Span) -> Self {
+        self.source_name = Some(source_name.into());
         if self.span.is_none() {
-            self.source_name = Some(source_name.into());
             self.span = Some(span);
         }
+        self
+    }
+
+    pub fn with_source_name(mut self, source_name: impl Into<String>) -> Self {
+        self.source_name = Some(source_name.into());
         self
     }
 
@@ -154,5 +159,14 @@ mod tests {
         assert!(rendered.contains("src/main.gb:2:20"));
         assert!(rendered.contains("^^^^^^^^"));
         assert!(rendered.contains("help:"));
+    }
+
+    #[test]
+    fn replaces_memory_source_name_without_losing_span() {
+        let diagnostic = Diagnostic::new("E0001", "bad token")
+            .with_location("<memory>", Span::single(1, 2, 1))
+            .with_source_name("src/main.gb");
+        assert_eq!(diagnostic.source_name.as_deref(), Some("src/main.gb"));
+        assert_eq!(diagnostic.span.unwrap().column, 2);
     }
 }
