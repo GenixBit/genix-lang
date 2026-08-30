@@ -50,6 +50,57 @@ Native executable
 
 The C backend consumes typed Genix IR, not the parser AST.
 
+## Typed error handling
+
+Genix now supports primitive-payload `Option` and `Result` values.
+
+```gb
+fn load(path: string) -> Result<string,string> {
+    let text: string = fs.try_read_text(path)?;
+    return Ok(text);
+}
+```
+
+Available forms currently include:
+
+```text
+Option<int>
+Option<float>
+Option<bool>
+Option<string>
+
+Result<int,string>
+Result<float,string>
+Result<bool,string>
+Result<string,string>
+```
+
+Constructors:
+
+```text
+Some(value)
+None
+Ok(value)
+Err(error)
+```
+
+`match` is exhaustive for `Option` and `Result`:
+
+```gb
+match result {
+    Ok(value) => {
+        print(value);
+    }
+    Err(error) => {
+        print(error);
+    }
+}
+```
+
+`?` propagates `Err(error)` from functions returning `Result<...,string>`.
+
+The bootstrap implementation currently allows `?` when it is the complete value of a variable initializer, assignment, or call expression statement. Arbitrary nested generic types, custom Result error types, and user-defined enums are future generalizations.
+
 ## Standard library
 
 Official modules are imported with normal Genix syntax:
@@ -65,47 +116,54 @@ import string;
 Current modules include:
 
 - `io` — typed output and `io.input(...)`
-- `fs` — `read_text(...)` and `write_text(...)`
-- `process` — environment lookup and process exit
+- `fs` — text I/O plus recoverable `try_read_text` / `try_write_text`
+- `process` — environment lookup, optional lookup, and process exit
 - `math` — basic numeric helpers
 - `string` — concatenation and equality helpers
 
 Module lookup order is project-local first, then `GENIX_STDLIB/modules/`. The compiler validates `genix-stdlib/COMPATIBILITY` before loading official modules.
 
-## Host-backed standard-library APIs
+## Safe host-backed APIs
 
-Genix now has a small **bootstrap native intrinsic boundary** for foundational OS-facing stdlib functionality.
+Preferred recoverable/optional APIs:
 
 ```gb
-import io;
 import fs;
 import process;
 
+fn save_and_load(path: string) -> Result<string,string> {
+    let written: bool = fs.try_write_text(path, "Genix safe IO")?;
+    let text: string = fs.try_read_text(path)?;
+    return Ok(text);
+}
+
 fn main() {
-    let name: string = io.input("Your name: ");
+    let home: Option<string> = process.env_option("HOME");
 
-    fs.write_text("hello.txt", "Hello " + name);
-    io.println(fs.read_text("hello.txt"));
-
-    io.println(process.env("HOME"));
+    match home {
+        Some(value) => {
+            print(value);
+        }
+        None => {
+            print("HOME is not set");
+        }
+    }
 }
 ```
 
-The public APIs are ordinary stdlib functions. Their implementation is selected by the execution path:
+Execution mapping:
 
 ```text
-Public Genix API     gb run / interpreter       gb build / native
----------------------------------------------------------------------
-io.input             Rust stdin                 gb_input
-fs.read_text         Rust filesystem            gb_fs_read_text
-fs.write_text        Rust filesystem            gb_fs_write_text
-process.env          Rust environment           gb_env_get
-process.exit         Rust process exit           gb_process_exit
+Public Genix API        gb run / interpreter       gb build / native
+--------------------------------------------------------------------------
+io.input                Rust stdin                 gb_input
+process.env_option      Rust environment           gb_env_get_option
+fs.try_read_text        Rust filesystem            gb_fs_try_read_text
+fs.try_write_text       Rust filesystem            gb_fs_try_write_text
+process.exit            Rust process exit          gb_process_exit
 ```
 
-This keeps application code portable while avoiding direct C/platform declarations in `.gb` source.
-
-The bootstrap intrinsic mapping is intentionally narrow. A general native FFI remains a separate future feature.
+Legacy bootstrap `fs.read_text`, `fs.write_text`, and `process.env` remain temporarily available for compatibility.
 
 ## Runtime integration
 
@@ -116,15 +174,13 @@ genix-runtime/include/genix/runtime.h
 genix-runtime/src/runtime.c
 ```
 
-Runtime ABI v1 currently provides lifecycle management, tracked allocation, panic handling, strings, typed output, stdin, environment lookup, text-file I/O, and process exit.
+Runtime ABI v1 provides lifecycle management, tracked allocation, panic handling, strings, typed output, stdin, filesystem/environment/process host services, and tagged primitive `Option` / `Result` carrier structures.
 
 Before native compilation, the compiler verifies:
 
 ```c
 #define GENIX_RUNTIME_ABI_VERSION 1
 ```
-
-so an incompatible runtime is rejected before invoking `cc`, `clang`, or `gcc`.
 
 ## Genix IR
 
@@ -133,7 +189,7 @@ gb ir
 gb ir path/to/project
 ```
 
-IR carries resolved function names, module-qualified calls, typed expressions and variables, structured control flow, and explicit safe casts such as `int → float`.
+IR carries resolved function names, module-qualified calls, typed expressions and variables, structured control flow, explicit safe casts, `Some`/`None`, `Ok`/`Err`, exhaustive `match`, and Result propagation.
 
 ## Developer CLI
 
@@ -153,6 +209,10 @@ gb help                        Show help
 - Multi-file and official stdlib modules
 - Typed functions, parameters, returns, and variables
 - `int`, `float`, `string`, `bool`
+- Primitive-payload `Option<T>` and `Result<T,string>`
+- `Some`, `None`, `Ok`, `Err`
+- Exhaustive `match` for Option/Result
+- Result propagation with `?`
 - Type inference and static checking
 - Safe `int → float` widening
 - `let` / `mut`
@@ -162,7 +222,7 @@ gb help                        Show help
 - C11 native backend
 - Debug and release native builds
 - External runtime and standard-library integration
-- Host-backed input/filesystem/environment/process APIs
+- Safe filesystem/environment host APIs
 - Cross-repository compiler/runtime/stdlib CI
 
 ## Current limitations
@@ -172,8 +232,8 @@ gb help                        Show help
 - The bootstrap native backend requires a C compiler.
 - Runtime and stdlib currently need to be discoverable locally.
 - Runtime string representation and memory ownership are temporary.
-- Filesystem errors do not yet use structured `Result` values.
-- Missing environment variables currently return an empty string.
+- Option/Result currently support primitive payloads only; Result errors are strings.
+- `?` placement is intentionally restricted while IR control-flow lowering is generalized.
 - Nested module imports and packages/registry are not implemented yet.
 - General native FFI, LLVM, and WebAssembly backends are not implemented yet.
 
@@ -196,10 +256,10 @@ src/
 
 The next priorities are:
 
-- Structured error model with `Result` / `Option`
-- Source-span diagnostics
+- Source-span diagnostics and substantially better compiler errors
 - `gb test`
 - `gb fmt`
+- Generalized enums and generics
 - Stable toolchain installation/discovery
 - General native FFI declarations
 - Filesystem/path/time expansion
@@ -240,11 +300,13 @@ export GENIX_RUNTIME=/path/to/genix-runtime
 export GENIX_STDLIB=/path/to/genix-stdlib
 cargo check
 cargo test
-cargo run -- run examples/intrinsics
-cargo run -- build examples/intrinsics
+cargo run -- run examples/error_handling
+cargo run -- ir examples/error_handling
+cargo run -- build examples/error_handling
+./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`, including real stdin, filesystem, and environment access.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`, including typed error handling and recoverable host I/O.
 
 ---
 
