@@ -166,7 +166,7 @@ fn is_gb_file(path: &str) -> bool {
 }
 
 fn compile_frontend(source_name: &str, source: &str) -> Result<ast::Program, String> {
-    let tokens = lexer::lex(source).map_err(|diagnostic| {
+    let tokens = lexer::lex_diagnostic(source).map_err(|diagnostic| {
         diagnostic
             .with_source_name(source_name.to_string())
             .render(Some(source))
