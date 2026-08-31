@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::ast::{Function, Program, Type};
+use crate::ast::{Expr, Function, Param, Program, Stmt, Type};
+use crate::diagnostics::{Diagnostic, Span};
 use crate::{interpreter, lexer, parser, project, typechecker};
 
 #[derive(Debug, Clone)]
@@ -9,6 +12,28 @@ struct RawTest {
     name: String,
     body: String,
     source_name: String,
+    source: String,
+    body_start: usize,
+    block_span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestSiteKind {
+    Assert,
+    Fail,
+}
+
+#[derive(Debug, Clone)]
+struct TestSite {
+    id: usize,
+    kind: TestSiteKind,
+    span: Span,
+}
+
+#[derive(Debug, Clone)]
+struct ExpandedTest {
+    source: String,
+    sites: Vec<TestSite>,
 }
 
 #[derive(Debug, Clone)]
@@ -16,6 +41,15 @@ struct CompiledTest {
     name: String,
     function_name: String,
     source_name: String,
+    source: String,
+    block_span: Span,
+    sites: Vec<TestSite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TestFailureSignal {
+    Assertion { site_id: usize },
+    Explicit { site_id: usize, message: String },
 }
 
 pub fn run(target: &Path) -> Result<(), String> {
@@ -26,6 +60,8 @@ pub fn run(target: &Path) -> Result<(), String> {
     };
 
     ensure_main(&mut program);
+    ensure_test_trap_signature(&mut program);
+    let trap_root = unique_trap_root();
 
     let mut compiled = Vec::new();
     for (source_name, source) in sources {
@@ -34,8 +70,8 @@ pub fn run(target: &Path) -> Result<(), String> {
 
         for raw in tests {
             let function_name = format!("__genix_test_{}", compiled.len());
-            let transformed = expand_test_builtins(&raw.body)?;
-            let wrapper = format!("fn {function_name}() {{\n{transformed}\n}}\n");
+            let expanded = expand_test_builtins(&raw, &trap_root)?;
+            let wrapper = format!("fn {function_name}() {{\n{}\n}}\n", expanded.source);
             let parsed = parse_diagnostic(&wrapper, &raw.source_name)?;
             let function = parsed
                 .functions
@@ -47,6 +83,9 @@ pub fn run(target: &Path) -> Result<(), String> {
                 name: raw.name,
                 function_name,
                 source_name: raw.source_name,
+                source: raw.source,
+                block_span: raw.block_span,
+                sites: expanded.sites,
             });
         }
     }
@@ -75,8 +114,15 @@ pub fn run(target: &Path) -> Result<(), String> {
             Err(error) => {
                 failed += 1;
                 println!("✗ {}", test.name);
-                println!("  {}", friendly_test_error(&error));
-                println!("  at {}", test.source_name);
+                if let Some(signal) = decode_test_trap(&error, &trap_root) {
+                    print!("{}", render_test_failure(test, signal));
+                } else {
+                    println!("  runtime error: {error}");
+                    println!(
+                        "  at {}:{}:{}",
+                        test.source_name, test.block_span.line, test.block_span.column
+                    );
+                }
             }
         }
     }
@@ -156,6 +202,21 @@ fn ensure_main(program: &mut Program) {
     });
 }
 
+fn ensure_test_trap_signature(program: &mut Program) {
+    if program.functions.iter().any(|function| function.name == "fs.read_text") {
+        return;
+    }
+    program.functions.push(Function {
+        name: "fs.read_text".to_string(),
+        params: vec![Param {
+            name: "path".to_string(),
+            ty: Type::String,
+        }],
+        return_type: Type::String,
+        body: vec![Stmt::Return(Some(Expr::String(String::new())))],
+    });
+}
+
 fn execute_test(program: &Program, test: &CompiledTest) -> Result<(), String> {
     let mut isolated = program.clone();
     isolated.functions.retain(|function| function.name != "main");
@@ -170,12 +231,68 @@ fn execute_test(program: &Program, test: &CompiledTest) -> Result<(), String> {
     interpreter::execute(&isolated)
 }
 
-fn friendly_test_error(error: &str) -> String {
-    if error == "division by zero" {
-        "assertion failed".to_string()
-    } else {
-        error.to_string()
+fn render_test_failure(test: &CompiledTest, signal: TestFailureSignal) -> String {
+    let (site_id, code, message, label) = match signal {
+        TestFailureSignal::Assertion { site_id } => (
+            site_id,
+            "T0001",
+            "assertion failed".to_string(),
+            "assertion evaluated to false".to_string(),
+        ),
+        TestFailureSignal::Explicit { site_id, message } => (
+            site_id,
+            "T0002",
+            format!("test failed: {}", message.replace('\n', "\\n")),
+            "explicit test failure".to_string(),
+        ),
+    };
+
+    let Some(site) = test.sites.iter().find(|site| site.id == site_id) else {
+        return format!("  test failure at {} (unknown site {site_id})\n", test.source_name);
+    };
+
+    let expected_kind = if code == "T0001" { TestSiteKind::Assert } else { TestSiteKind::Fail };
+    if site.kind != expected_kind {
+        return format!("  test failure at {} (site kind mismatch)\n", test.source_name);
     }
+
+    Diagnostic::new(code, message)
+        .with_location(test.source_name.clone(), site.span)
+        .with_label(label)
+        .render(Some(&test.source))
+}
+
+fn unique_trap_root() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!(".genix-test-trap-{}-{nanos}", process::id())
+}
+
+fn decode_test_trap(error: &str, trap_root: &str) -> Option<TestFailureSignal> {
+    let needle = format!("{trap_root}/");
+    let start = error.find(&needle)? + needle.len();
+    let end = error.rfind("') failed:").unwrap_or(error.len());
+    if start >= end {
+        return None;
+    }
+    let payload = &error[start..end];
+
+    if let Some(id) = payload.strip_prefix("ASSERT/") {
+        return Some(TestFailureSignal::Assertion {
+            site_id: id.parse().ok()?,
+        });
+    }
+
+    if let Some(rest) = payload.strip_prefix("FAIL/") {
+        let mut parts = rest.splitn(2, '/');
+        let site_id = parts.next()?.parse().ok()?;
+        let message = parts.next().unwrap_or_default().to_string();
+        return Some(TestFailureSignal::Explicit { site_id, message });
+    }
+
+    None
 }
 
 fn collect_gb_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -257,6 +374,9 @@ fn extract_tests(source: &str, source_name: &str) -> Result<(String, Vec<RawTest
                 name,
                 body,
                 source_name: source_name.to_string(),
+                source: source.to_string(),
+                body_start,
+                block_span: span_for_range(source, start, end),
             });
             regions.push((start, end));
             i = end;
@@ -287,10 +407,12 @@ fn extract_tests(source: &str, source_name: &str) -> Result<(String, Vec<RawTest
     Ok((stripped, tests))
 }
 
-fn expand_test_builtins(source: &str) -> Result<String, String> {
+fn expand_test_builtins(raw: &RawTest, trap_root: &str) -> Result<ExpandedTest, String> {
+    let source = &raw.body;
     let mut out = String::with_capacity(source.len());
+    let mut sites = Vec::new();
     let mut i = 0usize;
-    let mut assertion_index = 0usize;
+    let mut site_index = 0usize;
 
     while i < source.len() {
         if source[i..].starts_with("//") {
@@ -315,26 +437,50 @@ fn expand_test_builtins(source: &str) -> Result<String, String> {
             let after_name = skip_ws(source, i + name.len());
             if after_name < source.len() && next_char(source, after_name) == '(' {
                 let close = find_matching(source, after_name, '(', ')')?;
-                let args = source[after_name + 1..close].trim();
+                let raw_args = &source[after_name + 1..close];
+                let args = raw_args.trim();
+                let leading = raw_args.len().saturating_sub(raw_args.trim_start().len());
+                let trailing = raw_args.len().saturating_sub(raw_args.trim_end().len());
                 let mut end = skip_ws(source, close + 1);
                 if end < source.len() && next_char(source, end) == ';' {
                     end += 1;
                 }
+
                 match name {
                     "assert" => {
                         if args.is_empty() {
                             return Err("assert(...) requires a boolean condition".into());
                         }
+                        let arg_start = after_name + 1 + leading;
+                        let arg_end = close.saturating_sub(trailing);
+                        sites.push(TestSite {
+                            id: site_index,
+                            kind: TestSiteKind::Assert,
+                            span: span_for_range(
+                                &raw.source,
+                                raw.body_start + arg_start,
+                                raw.body_start + arg_end,
+                            ),
+                        });
                         out.push_str(&format!(
-                            "if !({args}) {{ let __genix_assert_fail_{assertion_index}: int = 1 / 0; }}"
+                            "if !({args}) {{ let __genix_assert_trap_{site_index}: string = fs.read_text(\"{trap_root}/ASSERT/{site_index}\"); }}"
                         ));
                     }
                     "fail" => {
                         if args.is_empty() {
                             return Err("fail(...) requires a string message".into());
                         }
+                        sites.push(TestSite {
+                            id: site_index,
+                            kind: TestSiteKind::Fail,
+                            span: span_for_range(
+                                &raw.source,
+                                raw.body_start + i,
+                                raw.body_start + end,
+                            ),
+                        });
                         out.push_str(&format!(
-                            "{{ let __genix_fail_message_{assertion_index}: string = ({args}); let __genix_fail_{assertion_index}: int = 1 / 0; }}"
+                            "{{ let __genix_fail_trap_{site_index}: string = fs.read_text(\"{trap_root}/FAIL/{site_index}/\" + ({args})); }}"
                         ));
                     }
                     "pass" => {
@@ -345,7 +491,7 @@ fn expand_test_builtins(source: &str) -> Result<String, String> {
                     }
                     _ => unreachable!(),
                 }
-                assertion_index += 1;
+                site_index += 1;
                 i = end;
                 continue;
             }
@@ -355,7 +501,31 @@ fn expand_test_builtins(source: &str) -> Result<String, String> {
         i += ch.len_utf8();
     }
 
-    Ok(out)
+    Ok(ExpandedTest { source: out, sites })
+}
+
+fn span_for_range(source: &str, start: usize, end: usize) -> Span {
+    let start = start.min(source.len());
+    let end = end.max(start + usize::from(start < source.len())).min(source.len());
+    let prefix = &source[..start];
+    let line = prefix.chars().filter(|ch| *ch == '\n').count() + 1;
+    let column = prefix
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.chars().count() + 1)
+        .unwrap_or_else(|| prefix.chars().count() + 1);
+
+    let selected = &source[start..end];
+    let newline_count = selected.chars().filter(|ch| *ch == '\n').count();
+    if newline_count == 0 {
+        return Span::single(line, column, selected.chars().count().max(1));
+    }
+
+    let end_line = line + newline_count;
+    let end_column = selected
+        .rsplit_once('\n')
+        .map(|(_, tail)| tail.chars().count().max(1))
+        .unwrap_or(1);
+    Span::between(line, column, end_line, end_column)
 }
 
 fn find_matching(source: &str, open: usize, open_ch: char, close_ch: char) -> Result<usize, String> {
@@ -487,6 +657,17 @@ fn next_char(source: &str, i: usize) -> char {
 mod tests {
     use super::*;
 
+    fn raw_test(body: &str) -> RawTest {
+        RawTest {
+            name: "demo".to_string(),
+            body: body.to_string(),
+            source_name: "tests/demo.gb".to_string(),
+            source: body.to_string(),
+            body_start: 0,
+            block_span: span_for_range(body, 0, body.len()),
+        }
+    }
+
     #[test]
     fn extracts_nested_test_blocks_without_touching_helpers() {
         let source = "fn helper() -> int { return 2; }\n\ntest \"math works\" {\n    if true { assert(helper() == 2); }\n}\n";
@@ -494,14 +675,41 @@ mod tests {
         assert!(stripped.contains("fn helper"));
         assert_eq!(tests.len(), 1);
         assert_eq!(tests[0].name, "math works");
+        assert_eq!(tests[0].block_span.line, 3);
     }
 
     #[test]
-    fn expands_test_builtins_into_valid_core_syntax() {
-        let source = "assert(2 + 2 == 4); fail(\"boom\"); pass();";
-        let expanded = expand_test_builtins(source).unwrap();
-        assert!(expanded.contains("__genix_assert_fail_0"));
-        assert!(expanded.contains("__genix_fail_message_1"));
-        assert!(expanded.contains("{}"));
+    fn expands_test_builtins_without_division_sentinel() {
+        let raw = raw_test("assert(2 + 2 == 4); fail(\"boom\"); pass();");
+        let expanded = expand_test_builtins(&raw, ".genix-test-trap-unit").unwrap();
+        assert!(expanded.source.contains("fs.read_text"));
+        assert!(expanded.source.contains("ASSERT/0"));
+        assert!(expanded.source.contains("FAIL/1/"));
+        assert!(!expanded.source.contains("1 / 0"));
+        assert_eq!(expanded.sites.len(), 2);
+    }
+
+    #[test]
+    fn decodes_assert_and_fail_but_not_runtime_errors() {
+        let root = ".genix-test-trap-unit";
+        let assert_error = format!(
+            "fs.read_text('{root}/ASSERT/4') failed: no such file"
+        );
+        assert_eq!(
+            decode_test_trap(&assert_error, root),
+            Some(TestFailureSignal::Assertion { site_id: 4 })
+        );
+
+        let fail_error = format!(
+            "fs.read_text('{root}/FAIL/7/expected true') failed: no such file"
+        );
+        assert_eq!(
+            decode_test_trap(&fail_error, root),
+            Some(TestFailureSignal::Explicit {
+                site_id: 7,
+                message: "expected true".to_string(),
+            })
+        );
+        assert_eq!(decode_test_trap("division by zero", root), None);
     }
 }
