@@ -35,7 +35,7 @@ gb build --release
 ```text
 Genix application + stdlib modules
         ↓
-Project/module loader
+Project/module loader + SourceMap
         ↓
 Lexer → Parser → AST
         ↓
@@ -64,11 +64,13 @@ Genix test frontend                         gb fmt
 parser + AST + checker          comment-preserving tokenizer
      ↓                                      ↓
 fresh interpreter per test        canonical source printer
+     ↓
+T0001 / T0002 diagnostics
 ```
 
 ## Genix formatting
 
-Genix now includes one canonical source formatter:
+Genix includes one canonical source formatter:
 
 ```bash
 gb fmt
@@ -141,13 +143,13 @@ Current test helpers are:
 
 ```text
 assert(condition)   Fail if a bool condition is false
-fail(message)       Deliberately fail the test
+fail(message)       Deliberately fail the test and preserve the message
 pass()              Explicit successful no-op
 ```
 
 Test files may define ordinary helper functions outside test blocks. Each test executes using a fresh interpreter instance, and a suite with any failure returns a non-zero process status.
 
-Example output:
+Successful output:
 
 ```text
 Genix Test Runner
@@ -159,11 +161,32 @@ Genix Test Runner
 0 failed
 ```
 
-The test DSL is currently recognized by `gb test`, not by the normal application parser path used by `gb run`, `gb check`, `gb ir`, and `gb build`. The bootstrap implementation uses an internal controlled runtime failure sentinel for `assert`/`fail`; a dedicated test-failure runtime channel is planned so genuine runtime errors can always be distinguished from assertion failures.
+Failed assertions are now source-aware test diagnostics:
 
-## Compiler diagnostics
+```text
+✗ addition works
+error[T0001]: assertion failed
+ --> tests/math.gb:2:12
+   |
+ 2 |     assert(2 + 2 == 5);
+   |            ^^^^^^^^^^ assertion evaluated to false
+```
 
-Genix has coded, source-aware compiler diagnostics for direct `.gb` source commands.
+Explicit failures use `T0002` and retain their message:
+
+```text
+error[T0002]: test failed: expected Err
+```
+
+Genuine interpreter failures remain runtime errors rather than being classified as assertions. The old division-by-zero assertion sentinel has been removed.
+
+The current pre-alpha runner records each assertion/fail source site and uses a private per-run failure trap to carry the site ID/message back to the runner. Internally that trap currently reuses an existing host-read failure path; it is not a public filesystem or Runtime ABI contract and can later be replaced by a structured interpreter-level test signal without changing `T0001` / `T0002` behavior.
+
+The test DSL is recognized by `gb test`, not by the normal application parser path used by `gb run`, `gb check`, `gb ir`, and `gb build`.
+
+## Compiler diagnostics and source maps
+
+Genix has coded, source-aware compiler diagnostics.
 
 ```text
 error[E0201]: initializer for 'age' expected int, found string
@@ -174,7 +197,7 @@ error[E0201]: initializer for 'age' expected int, found string
   = help: change the expression or annotation so the types are compatible
 ```
 
-Current error-code families:
+Current compiler error-code families:
 
 ```text
 E000x  lexer
@@ -182,9 +205,18 @@ E010x  parser / syntax
 E020x  static type checking
 ```
 
-The diagnostic model carries an error code, source filename, line/column span, primary label, and optional help. Lexer/parser diagnostics use exact token spans. Type-checker messages are classified and mapped back to relevant source locations by the frontend diagnostics adapter.
+Test failures use the separate `T000x` family.
 
-The executable AST and Genix IR intentionally remain independent from terminal rendering metadata. The next diagnostics milestone will add richer external source maps for imported project files and secondary labels without coupling backend IR to source presentation.
+Project/module loading now maintains a frontend `SourceMap` containing original source text plus canonical function/module ownership. Imported-module lexer/parser failures therefore retain their real file names, and semantic failures can be mapped back to the module that supplied the failing function after project functions are merged for checking.
+
+Diagnostics support related locations as secondary labels:
+
+```text
+ --> src/math.gb:2:22
+ ::: src/main.gb:4:11
+```
+
+These can show where a module was referenced or where a related function was defined. Source-map and terminal presentation metadata stay outside executable AST/IR structures.
 
 ## Typed error handling
 
@@ -332,7 +364,7 @@ IR carries resolved function names, module-qualified calls, typed expressions an
 ```text
 gb new <name>                  Create a new Genix project
 gb run [target]                Execute through the interpreter
-gb check [target]              Check syntax, modules, stdlib, and types
+gb check [target]              Check a .gb file or project
 gb test [target]               Run tests/*.gb or a standalone test file
 gb fmt [target] [--check]      Format Genix source or verify canonical formatting
 gb ir [target]                 Print typed Genix IR
@@ -345,6 +377,8 @@ gb help                        Show help
 
 - `.gb` source files and `genix.toml` projects
 - Multi-file and official stdlib modules
+- Multi-file `SourceMap` with function/module ownership
+- Primary and secondary diagnostic locations
 - First-class `gb fmt` canonical formatter
 - Recursive `src/**/*.gb` and `tests/**/*.gb` formatting
 - Comment- and string-preserving lexical formatting
@@ -353,6 +387,9 @@ gb help                        Show help
 - Recursive `tests/**/*.gb` discovery
 - Named `test "..." { ... }` blocks
 - `assert`, `fail`, and `pass` testing helpers
+- Dedicated `T0001` / `T0002` test diagnostics
+- Exact assertion/fail source spans and `fail(message)` reporting
+- Runtime errors distinct from assertion/test failures
 - Isolated interpreter instance per test
 - Non-zero test-suite exit status on failure
 - Typed functions, parameters, returns, and variables
@@ -384,12 +421,13 @@ gb help                        Show help
 - Runtime string representation and memory ownership are temporary.
 - Option/Result currently support primitive payloads only; Result errors are strings.
 - `?` placement is intentionally restricted while IR control-flow lowering is generalized.
-- Direct-file lexer/parser diagnostics have exact spans; merged multi-file semantic source maps are still being generalized.
+- Semantic source spans are currently resolved by the frontend/project diagnostics adapter; the checker does not yet return structured source diagnostics directly.
 - The formatter does not yet wrap long lines, reorder imports, format `genix.toml`, or expose style configuration.
 - Test declarations are currently handled only by the `gb test` frontend.
 - Test-file imports are not independently resolved yet.
-- `fail(message)` validates its message but does not yet print it in the final failure report.
-- The bootstrap assertion sentinel can cause a genuine test-time division-by-zero error to be reported as `assertion failed`.
+- Runtime errors in tests currently report the enclosing test-block location instead of the exact runtime expression.
+- Test assertion value diffs are not implemented yet.
+- The private test-failure trap currently piggybacks on an existing host-read failure path and should become a structured interpreter-level signal later.
 - Nested module imports and packages/registry are not implemented yet.
 - General native FFI, LLVM, and WebAssembly backends are not implemented yet.
 
@@ -399,6 +437,7 @@ gb help                        Show help
 src/
 ├── ast.rs
 ├── diagnostics.rs
+├── source_map.rs
 ├── formatter.rs
 ├── lexer.rs
 ├── parser.rs
@@ -415,9 +454,10 @@ src/
 
 The next priorities are:
 
-- Rich multi-file source maps and secondary diagnostic labels
-- Dedicated test failure intrinsic with assertion spans/messages
+- Checker-native structured semantic diagnostics with source IDs/spans
+- Machine-readable diagnostics groundwork for LSP/editor integrations
 - Generalized enums and generics
+- Expected/actual assertion value reporting and test filtering
 - Stable toolchain installation/discovery
 - General native FFI declarations
 - Filesystem/path/time expansion
@@ -466,7 +506,7 @@ cargo run -- build examples/error_handling
 ./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It verifies `gb fmt` failure/success behavior, idempotence, comment preservation, post-format compilation/testing, successful and failing `gb test` suites, and intentionally invalid source files for compiler diagnostic verification.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It verifies formatter behavior, project and standalone testing, source-aware diagnostics, runtime/stdlib integration, safe error handling, and debug/release native builds. Test-runner unit coverage specifically verifies that assertion/fail trap signals decode separately from genuine division-by-zero runtime failures.
 
 ---
 
