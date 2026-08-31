@@ -4,7 +4,7 @@
 
 > Status: **pre-alpha / v0.0.1**. Syntax, runtime behavior, standard-library APIs, and compiler interfaces may change.
 
-## Create, run, test, inspect, and compile
+## Create, format, run, test, inspect, and compile
 
 ```bash
 gb new hello-genix
@@ -13,9 +13,10 @@ cd hello-genix
 export GENIX_RUNTIME=/path/to/genix-runtime
 export GENIX_STDLIB=/path/to/genix-stdlib
 
-gb run
+gb fmt --check
 gb check
 gb test
+gb run
 gb ir
 gb build
 ./build/hello-genix
@@ -53,17 +54,65 @@ Native executable
 
 The C backend consumes typed Genix IR, not the parser AST.
 
-Testing is a separate developer-tooling path so tests do not enter application IR/native builds:
+Testing and formatting are separate developer-tooling paths so they do not pollute application IR/native builds:
 
 ```text
-tests/*.gb
-    ↓
-Genix test frontend
-    ↓
-normal parser + AST + type checker
-    ↓
-fresh interpreter per test
+tests/**/*.gb                  src/**/*.gb + tests/**/*.gb
+     ↓                                      ↓
+Genix test frontend                         gb fmt
+     ↓                                      ↓
+parser + AST + checker          comment-preserving tokenizer
+     ↓                                      ↓
+fresh interpreter per test        canonical source printer
 ```
+
+## Genix formatting
+
+Genix now includes one canonical source formatter:
+
+```bash
+gb fmt
+gb fmt path/to/project
+gb fmt src/main.gb
+gb fmt --check
+```
+
+For a project target, `gb fmt` recursively formats:
+
+```text
+src/**/*.gb
+tests/**/*.gb
+```
+
+The current canonical style includes:
+
+- four-space block indentation
+- one space around binary operators
+- `name: type` annotations
+- canonical function signatures such as `fn add(a: int, b: int) -> int`
+- compact bootstrap generic punctuation such as `Option<string>` and `Result<string,string>`
+- consistently expanded blocks and match arms
+- blank lines between top-level declarations
+- preservation of string literal contents
+- preservation of standalone and trailing `//` comments
+
+Example:
+
+```gb
+fn add(a:int,b:int)->int{return a+b;}
+```
+
+becomes:
+
+```gb
+fn add(a: int, b: int) -> int {
+    return a + b;
+}
+```
+
+`gb fmt --check` performs no writes and returns a non-zero process status when formatting changes are required. Formatter output is idempotent, making it suitable for CI.
+
+The formatter is deliberately lexical/comment-preserving instead of AST-based because the executable AST does not retain comments. Genix IR is not involved in formatting.
 
 ## Genix testing
 
@@ -135,7 +184,7 @@ E020x  static type checking
 
 The diagnostic model carries an error code, source filename, line/column span, primary label, and optional help. Lexer/parser diagnostics use exact token spans. Type-checker messages are classified and mapped back to relevant source locations by the frontend diagnostics adapter.
 
-The executable AST and Genix IR intentionally remain independent from rendering metadata. Rich multi-file source maps can therefore evolve without coupling the interpreter or native backend to terminal presentation concerns.
+The executable AST and Genix IR intentionally remain independent from terminal rendering metadata. The next diagnostics milestone will add richer external source maps for imported project files and secondary labels without coupling backend IR to source presentation.
 
 ## Typed error handling
 
@@ -285,6 +334,7 @@ gb new <name>                  Create a new Genix project
 gb run [target]                Execute through the interpreter
 gb check [target]              Check syntax, modules, stdlib, and types
 gb test [target]               Run tests/*.gb or a standalone test file
+gb fmt [target] [--check]      Format Genix source or verify canonical formatting
 gb ir [target]                 Print typed Genix IR
 gb build [project] [--release] Build and link a native executable
 gb version                     Show the current version
@@ -295,6 +345,10 @@ gb help                        Show help
 
 - `.gb` source files and `genix.toml` projects
 - Multi-file and official stdlib modules
+- First-class `gb fmt` canonical formatter
+- Recursive `src/**/*.gb` and `tests/**/*.gb` formatting
+- Comment- and string-preserving lexical formatting
+- Formatter idempotence and CI-ready `gb fmt --check`
 - First-class `gb test` developer workflow
 - Recursive `tests/**/*.gb` discovery
 - Named `test "..." { ... }` blocks
@@ -331,6 +385,7 @@ gb help                        Show help
 - Option/Result currently support primitive payloads only; Result errors are strings.
 - `?` placement is intentionally restricted while IR control-flow lowering is generalized.
 - Direct-file lexer/parser diagnostics have exact spans; merged multi-file semantic source maps are still being generalized.
+- The formatter does not yet wrap long lines, reorder imports, format `genix.toml`, or expose style configuration.
 - Test declarations are currently handled only by the `gb test` frontend.
 - Test-file imports are not independently resolved yet.
 - `fail(message)` validates its message but does not yet print it in the final failure report.
@@ -344,6 +399,7 @@ gb help                        Show help
 src/
 ├── ast.rs
 ├── diagnostics.rs
+├── formatter.rs
 ├── lexer.rs
 ├── parser.rs
 ├── typechecker.rs
@@ -359,9 +415,8 @@ src/
 
 The next priorities are:
 
-- `gb fmt`
-- Dedicated test failure intrinsic with assertion spans/messages
 - Rich multi-file source maps and secondary diagnostic labels
+- Dedicated test failure intrinsic with assertion spans/messages
 - Generalized enums and generics
 - Stable toolchain installation/discovery
 - General native FFI declarations
@@ -403,6 +458,7 @@ export GENIX_RUNTIME=/path/to/genix-runtime
 export GENIX_STDLIB=/path/to/genix-stdlib
 cargo check
 cargo test
+cargo run -- fmt /tmp/genix-project --check
 cargo run -- test /tmp/genix-project
 cargo run -- run examples/error_handling
 cargo run -- ir examples/error_handling
@@ -410,7 +466,7 @@ cargo run -- build examples/error_handling
 ./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It exercises successful and failing `gb test` suites as well as intentionally invalid source files for compiler diagnostic verification.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It verifies `gb fmt` failure/success behavior, idempotence, comment preservation, post-format compilation/testing, successful and failing `gb test` suites, and intentionally invalid source files for compiler diagnostic verification.
 
 ---
 
