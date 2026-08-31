@@ -8,7 +8,10 @@ enum Token {
     Word(String),
     Number(String),
     StringLiteral(String),
-    Comment(String),
+    Comment {
+        text: String,
+        leading_newline: bool,
+    },
     Symbol(String),
 }
 
@@ -18,9 +21,13 @@ impl Token {
             Token::Word(value)
             | Token::Number(value)
             | Token::StringLiteral(value)
-            | Token::Comment(value)
             | Token::Symbol(value) => value,
+            Token::Comment { text, .. } => text,
         }
+    }
+
+    fn is_inline_comment(&self) -> bool {
+        matches!(self, Token::Comment { leading_newline: false, .. })
     }
 }
 
@@ -134,11 +141,17 @@ impl Printer {
 
     fn write_token(&mut self, token: &Token, next: Option<&Token>) {
         match token {
-            Token::Comment(comment) => {
+            Token::Comment {
+                text,
+                leading_newline,
+            } => {
+                if *leading_newline && !self.line.trim().is_empty() {
+                    self.flush_line();
+                }
                 if !self.line.trim().is_empty() {
                     self.space();
                 }
-                self.line.push_str(comment.trim_end());
+                self.line.push_str(text.trim_end());
                 self.flush_line();
             }
             Token::Word(word) | Token::Number(word) | Token::StringLiteral(word) => {
@@ -188,7 +201,9 @@ impl Printer {
             ";" => {
                 self.trim_line();
                 self.line.push(';');
-                self.flush_line();
+                if !next.is_some_and(Token::is_inline_comment) {
+                    self.flush_line();
+                }
             }
             "," => {
                 self.trim_line();
@@ -285,8 +300,9 @@ impl Printer {
         }
         match self.previous.as_ref() {
             None => false,
+            Some(Token::Symbol(symbol)) if symbol == "," && self.generic_depth > 0 => false,
             Some(Token::Symbol(symbol)) => !matches!(symbol.as_str(), "(" | "." | "<" | "!" | "-"),
-            Some(Token::Comment(_)) => false,
+            Some(Token::Comment { .. }) => false,
             _ => true,
         }
     }
@@ -340,10 +356,14 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     let chars: Vec<char> = source.chars().collect();
     let mut tokens = Vec::new();
     let mut i = 0usize;
+    let mut pending_newline = false;
 
     while i < chars.len() {
         let ch = chars[i];
         if ch.is_whitespace() {
+            if ch == '\n' {
+                pending_newline = true;
+            }
             i += 1;
             continue;
         }
@@ -354,7 +374,11 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
-            tokens.push(Token::Comment(chars[start..i].iter().collect()));
+            tokens.push(Token::Comment {
+                text: chars[start..i].iter().collect(),
+                leading_newline: pending_newline,
+            });
+            pending_newline = false;
             continue;
         }
 
@@ -377,10 +401,11 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                     break;
                 }
             }
-            if i > chars.len() || chars.get(i.saturating_sub(1)) != Some(&'"') {
+            if chars.get(i.saturating_sub(1)) != Some(&'"') {
                 return Err("formatter found an unterminated string literal".into());
             }
             tokens.push(Token::StringLiteral(chars[start..i].iter().collect()));
+            pending_newline = false;
             continue;
         }
 
@@ -391,6 +416,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             tokens.push(Token::Word(chars[start..i].iter().collect()));
+            pending_newline = false;
             continue;
         }
 
@@ -401,6 +427,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             tokens.push(Token::Number(chars[start..i].iter().collect()));
+            pending_newline = false;
             continue;
         }
 
@@ -409,12 +436,14 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
             if matches!(pair.as_str(), "->" | "=>" | "==" | "!=" | "<=" | ">=" | "&&" | "||") {
                 tokens.push(Token::Symbol(pair));
                 i += 2;
+                pending_newline = false;
                 continue;
             }
         }
 
         tokens.push(Token::Symbol(ch.to_string()));
         i += 1;
+        pending_newline = false;
     }
 
     Ok(tokens)
@@ -433,10 +462,11 @@ mod tests {
 
     #[test]
     fn preserves_comments_and_string_contents() {
-        let source = "fn main(){// keep this\nlet x:string=\"a   b\";// trailing\nprint(x);}";
+        let source = "fn main(){// keep this\nlet x:string=\"a   b\";// trailing\n// standalone\nprint(x);}";
         let formatted = format_source(source).unwrap();
         assert!(formatted.contains("    // keep this\n"));
         assert!(formatted.contains("\"a   b\"; // trailing\n"));
+        assert!(formatted.contains("    // standalone\n"));
     }
 
     #[test]
