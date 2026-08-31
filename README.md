@@ -4,7 +4,7 @@
 
 > Status: **pre-alpha / v0.0.1**. Syntax, runtime behavior, standard-library APIs, and compiler interfaces may change.
 
-## Create, run, inspect, and compile
+## Create, run, test, inspect, and compile
 
 ```bash
 gb new hello-genix
@@ -15,10 +15,13 @@ export GENIX_STDLIB=/path/to/genix-stdlib
 
 gb run
 gb check
+gb test
 gb ir
 gb build
 ./build/hello-genix
 ```
+
+`gb new` creates both `src/main.gb` and a starter `tests/smoke.gb` test.
 
 Release build:
 
@@ -50,9 +53,68 @@ Native executable
 
 The C backend consumes typed Genix IR, not the parser AST.
 
+Testing is a separate developer-tooling path so tests do not enter application IR/native builds:
+
+```text
+tests/*.gb
+    ↓
+Genix test frontend
+    ↓
+normal parser + AST + type checker
+    ↓
+fresh interpreter per test
+```
+
+## Genix testing
+
+Project tests live under `tests/`:
+
+```gb
+test "addition works" {
+    assert(2 + 2 == 4);
+}
+
+test "comparison works" {
+    let value: int = 12;
+    assert(value > 10);
+}
+```
+
+Run the suite with:
+
+```bash
+gb test
+gb test path/to/project
+gb test path/to/test.gb
+```
+
+Current test helpers are:
+
+```text
+assert(condition)   Fail if a bool condition is false
+fail(message)       Deliberately fail the test
+pass()              Explicit successful no-op
+```
+
+Test files may define ordinary helper functions outside test blocks. Each test executes using a fresh interpreter instance, and a suite with any failure returns a non-zero process status.
+
+Example output:
+
+```text
+Genix Test Runner
+
+✓ addition works
+✓ comparison works
+
+2 passed
+0 failed
+```
+
+The test DSL is currently recognized by `gb test`, not by the normal application parser path used by `gb run`, `gb check`, `gb ir`, and `gb build`. The bootstrap implementation uses an internal controlled runtime failure sentinel for `assert`/`fail`; a dedicated test-failure runtime channel is planned so genuine runtime errors can always be distinguished from assertion failures.
+
 ## Compiler diagnostics
 
-Genix now has coded, source-aware compiler diagnostics for direct `.gb` source commands.
+Genix has coded, source-aware compiler diagnostics for direct `.gb` source commands.
 
 ```text
 error[E0201]: initializer for 'age' expected int, found string
@@ -222,6 +284,7 @@ IR carries resolved function names, module-qualified calls, typed expressions an
 gb new <name>                  Create a new Genix project
 gb run [target]                Execute through the interpreter
 gb check [target]              Check syntax, modules, stdlib, and types
+gb test [target]               Run tests/*.gb or a standalone test file
 gb ir [target]                 Print typed Genix IR
 gb build [project] [--release] Build and link a native executable
 gb version                     Show the current version
@@ -232,6 +295,12 @@ gb help                        Show help
 
 - `.gb` source files and `genix.toml` projects
 - Multi-file and official stdlib modules
+- First-class `gb test` developer workflow
+- Recursive `tests/**/*.gb` discovery
+- Named `test "..." { ... }` blocks
+- `assert`, `fail`, and `pass` testing helpers
+- Isolated interpreter instance per test
+- Non-zero test-suite exit status on failure
 - Typed functions, parameters, returns, and variables
 - `int`, `float`, `string`, `bool`
 - Primitive-payload `Option<T>` and `Result<T,string>`
@@ -262,6 +331,10 @@ gb help                        Show help
 - Option/Result currently support primitive payloads only; Result errors are strings.
 - `?` placement is intentionally restricted while IR control-flow lowering is generalized.
 - Direct-file lexer/parser diagnostics have exact spans; merged multi-file semantic source maps are still being generalized.
+- Test declarations are currently handled only by the `gb test` frontend.
+- Test-file imports are not independently resolved yet.
+- `fail(message)` validates its message but does not yet print it in the final failure report.
+- The bootstrap assertion sentinel can cause a genuine test-time division-by-zero error to be reported as `assertion failed`.
 - Nested module imports and packages/registry are not implemented yet.
 - General native FFI, LLVM, and WebAssembly backends are not implemented yet.
 
@@ -274,6 +347,7 @@ src/
 ├── lexer.rs
 ├── parser.rs
 ├── typechecker.rs
+├── testing.rs
 ├── ir.rs
 ├── interpreter.rs
 ├── project.rs
@@ -285,8 +359,8 @@ src/
 
 The next priorities are:
 
-- `gb test`
 - `gb fmt`
+- Dedicated test failure intrinsic with assertion spans/messages
 - Rich multi-file source maps and secondary diagnostic labels
 - Generalized enums and generics
 - Stable toolchain installation/discovery
@@ -329,13 +403,14 @@ export GENIX_RUNTIME=/path/to/genix-runtime
 export GENIX_STDLIB=/path/to/genix-stdlib
 cargo check
 cargo test
+cargo run -- test /tmp/genix-project
 cargo run -- run examples/error_handling
 cargo run -- ir examples/error_handling
 cargo run -- build examples/error_handling
 ./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It now also executes intentionally invalid source files and verifies diagnostic error codes, locations, carets, and help output.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It exercises successful and failing `gb test` suites as well as intentionally invalid source files for compiler diagnostic verification.
 
 ---
 
