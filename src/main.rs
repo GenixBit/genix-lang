@@ -1,6 +1,7 @@
 mod ast;
 mod codegen;
 mod diagnostics;
+mod formatter;
 mod interpreter;
 mod ir;
 mod lexer;
@@ -27,6 +28,7 @@ fn main() {
         Some("run") => run_target(args.next().as_deref()),
         Some("check") => check_target(args.next().as_deref()),
         Some("test") => test_target(args.next().as_deref()),
+        Some("fmt") => fmt_target(args.collect()),
         Some("ir") => ir_target(args.next().as_deref()),
         Some("build") => build_target(args.collect()),
         Some("version") | Some("--version") | Some("-V") => {
@@ -110,6 +112,52 @@ fn check_target(target: Option<&str>) -> Result<(), String> {
 
 fn test_target(target: Option<&str>) -> Result<(), String> {
     testing::run(Path::new(target.unwrap_or(".")))
+}
+
+fn fmt_target(args: Vec<String>) -> Result<(), String> {
+    let mut target: Option<String> = None;
+    let mut check = false;
+
+    for arg in args {
+        if arg == "--check" {
+            check = true;
+        } else if arg.starts_with('-') {
+            return Err(format!("unknown fmt option '{arg}'"));
+        } else if target.is_none() {
+            target = Some(arg);
+        } else {
+            return Err("gb fmt accepts at most one target path".into());
+        }
+    }
+
+    let target = Path::new(target.as_deref().unwrap_or("."));
+    let summary = formatter::format_target(target, check)?;
+
+    if check {
+        if summary.changed.is_empty() {
+            println!("✓ {} Genix file(s) are canonically formatted", summary.files);
+            return Ok(());
+        }
+
+        println!("Genix formatting check failed:");
+        for path in &summary.changed {
+            println!("  {}", path.display());
+        }
+        return Err(format!(
+            "{} Genix file(s) need formatting; run 'gb fmt' to update them",
+            summary.changed.len()
+        ));
+    }
+
+    if summary.changed.is_empty() {
+        println!("✓ {} Genix file(s) already formatted", summary.files);
+    } else {
+        for path in &summary.changed {
+            println!("✓ formatted {}", path.display());
+        }
+        println!("{} Genix file(s) formatted", summary.changed.len());
+    }
+    Ok(())
 }
 
 fn ir_target(target: Option<&str>) -> Result<(), String> {
@@ -214,6 +262,7 @@ fn print_help() {
     println!("  gb run [target]                Run a .gb file or project");
     println!("  gb check [target]              Check a .gb file or project");
     println!("  gb test [target]               Run tests/*.gb or a standalone test file");
+    println!("  gb fmt [target] [--check]      Format Genix source or verify canonical formatting");
     println!("  gb ir [target]                 Print typed Genix intermediate representation");
     println!("  gb build [project] [--release] Build a native executable from Genix IR");
     println!("  gb version                     Show the current version");
@@ -223,6 +272,11 @@ fn print_help() {
     println!("  test \"addition works\" {{");
     println!("      assert(2 + 2 == 4);");
     println!("  }}");
+    println!();
+    println!("Formatter:");
+    println!("  gb fmt                         Format src/**/*.gb and tests/**/*.gb");
+    println!("  gb fmt src/main.gb             Format one source file");
+    println!("  gb fmt --check                 Fail if project files need formatting");
     println!();
     println!("Native build requirements:");
     println!("  cc, clang, or gcc on PATH (or set CC)");
