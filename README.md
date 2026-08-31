@@ -41,6 +41,10 @@ Lexer → Parser → AST
         ↓
 Static Type Checker
         ↓
+Structured semantic diagnostics
+        │
+        └── SourceMap → source file/span + related labels
+        ↓
 Typed Genix IR
         ↓
 C11 backend
@@ -52,7 +56,7 @@ Genix Runtime ABI v1
 Native executable
 ```
 
-The C backend consumes typed Genix IR, not the parser AST.
+The C backend consumes typed Genix IR, not the parser AST. Semantic diagnostics are produced by the checker as structured errors instead of being reconstructed from type-error strings after checking.
 
 Testing and formatting are separate developer-tooling paths so they do not pollute application IR/native builds:
 
@@ -207,7 +211,9 @@ E020x  static type checking
 
 Test failures use the separate `T000x` family.
 
-Project/module loading now maintains a frontend `SourceMap` containing original source text plus canonical function/module ownership. Imported-module lexer/parser failures therefore retain their real file names, and semantic failures can be mapped back to the module that supplied the failing function after project functions are merged for checking.
+The semantic checker now owns the `E020x` classification. Type mismatch, undefined-name, immutable-assignment, return, match, `?`, call-signature, invalid-value, duplicate-declaration, and `main` errors are constructed with their stable code, message, label, help, current function identity, location hint, and optional related function at the point where the checker detects the failure.
+
+Project/module loading maintains a frontend `SourceMap` containing original source text plus canonical function/module ownership. `check_diagnostic(...)` resolves the checker-owned semantic context through that map to produce the developer-facing source filename/span and related labels. The previous pipeline that parsed type-error strings, classified their wording, stubbed unrelated function bodies, and re-ran the checker to guess the failing module is no longer part of semantic diagnostics.
 
 Diagnostics support related locations as secondary labels:
 
@@ -378,7 +384,10 @@ gb help                        Show help
 - `.gb` source files and `genix.toml` projects
 - Multi-file and official stdlib modules
 - Multi-file `SourceMap` with function/module ownership
+- Checker-native structured `E020x` semantic diagnostics
 - Primary and secondary diagnostic locations
+- Semantic codes/labels/help assigned at the detection site rather than inferred from error text
+- Related function/module locations for cross-file semantic failures
 - First-class `gb fmt` canonical formatter
 - Recursive `src/**/*.gb` and `tests/**/*.gb` formatting
 - Comment- and string-preserving lexical formatting
@@ -421,7 +430,7 @@ gb help                        Show help
 - Runtime string representation and memory ownership are temporary.
 - Option/Result currently support primitive payloads only; Result errors are strings.
 - `?` placement is intentionally restricted while IR control-flow lowering is generalized.
-- Semantic source spans are currently resolved by the frontend/project diagnostics adapter; the checker does not yet return structured source diagnostics directly.
+- Semantic diagnostics are structured, but many expression spans are still resolved from checker location hints against original source text because executable AST nodes do not yet retain semantic source IDs/spans.
 - The formatter does not yet wrap long lines, reorder imports, format `genix.toml`, or expose style configuration.
 - Test declarations are currently handled only by the `gb test` frontend.
 - Test-file imports are not independently resolved yet.
@@ -454,8 +463,9 @@ src/
 
 The next priorities are:
 
-- Checker-native structured semantic diagnostics with source IDs/spans
-- Machine-readable diagnostics groundwork for LSP/editor integrations
+- Machine-readable diagnostics (`--json`) with a stable schema for editor/LSP clients
+- Expression-level semantic source IDs/spans instead of source-text location hints
+- Diagnostic notes/suggestions and richer multi-label semantic errors
 - Generalized enums and generics
 - Expected/actual assertion value reporting and test filtering
 - Stable toolchain installation/discovery
@@ -506,7 +516,7 @@ cargo run -- build examples/error_handling
 ./examples/error_handling/build/error-handling-demo
 ```
 
-GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. It verifies formatter behavior, project and standalone testing, source-aware diagnostics, runtime/stdlib integration, safe error handling, and debug/release native builds. Test-runner unit coverage specifically verifies that assertion/fail trap signals decode separately from genuine division-by-zero runtime failures.
+GitHub Actions validates interpreter and native behavior across `genix-lang`, `genix-runtime`, and `genix-stdlib`. The main workflow verifies formatter behavior, project and standalone testing, runtime/stdlib integration, safe error handling, and debug/release native builds. A dedicated Semantic Diagnostics workflow verifies checker-owned error codes, direct call-signature diagnostics with related definitions, imported-module primary locations, and cross-file module-reference labels.
 
 ---
 
