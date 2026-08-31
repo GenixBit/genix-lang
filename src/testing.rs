@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Function, Program, Type};
-use crate::{diagnostics, interpreter, lexer, parser, project, typechecker};
+use crate::{interpreter, lexer, parser, project, typechecker};
 
 #[derive(Debug, Clone)]
 struct RawTest {
@@ -116,14 +116,7 @@ fn load_standalone(target: &Path) -> Result<(Program, Vec<(String, String)>), St
     let source = fs::read_to_string(target)
         .map_err(|error| format!("could not read {}: {error}", target.display()))?;
     let source_name = target.display().to_string();
-    let (stripped, _) = extract_tests(&source, &source_name)?;
-    let mut program = if contains_genix_code(&stripped) {
-        parse_diagnostic(&stripped, &source_name)?
-    } else {
-        Program { functions: Vec::new() }
-    };
-    ensure_main(&mut program);
-    Ok((program, vec![(source_name, source)]))
+    Ok((Program { functions: Vec::new() }, vec![(source_name, source)]))
 }
 
 fn append_helper_functions(program: &mut Program, source: &str, source_name: &str) -> Result<(), String> {
