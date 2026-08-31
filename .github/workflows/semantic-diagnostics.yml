@@ -1,0 +1,83 @@
+name: Semantic Diagnostics
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  diagnostics:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout compiler
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify direct semantic codes
+        run: |
+          cat > /tmp/genix-semantic-direct.gb <<'GB'
+          fn add(value: int) -> int {
+              return value;
+          }
+
+          fn main() {
+              print(add(1, 2));
+          }
+          GB
+
+          set +e
+          output=$(cargo run --quiet -- check /tmp/genix-semantic-direct.gb 2>&1)
+          status=$?
+          set -e
+
+          test $status -ne 0
+          echo "$output"
+          echo "$output" | grep 'error\[E0207\]'
+          echo "$output" | grep '/tmp/genix-semantic-direct.gb:6:'
+          echo "$output" | grep 'function call does not match its signature'
+          echo "$output" | grep 'function defined here'
+
+      - name: Verify imported module semantic location
+        run: |
+          rm -rf /tmp/genix-semantic-project
+          mkdir -p /tmp/genix-semantic-project/src
+
+          cat > /tmp/genix-semantic-project/genix.toml <<'TOML'
+          [project]
+          name = "semantic-diagnostics"
+          entry = "src/main.gb"
+          TOML
+
+          cat > /tmp/genix-semantic-project/src/main.gb <<'GB'
+          import math;
+
+          fn main() {
+              print(math.bad());
+          }
+          GB
+
+          cat > /tmp/genix-semantic-project/src/math.gb <<'GB'
+          fn bad() -> int {
+              let value: int = "wrong";
+              return value;
+          }
+          GB
+
+          set +e
+          output=$(cargo run --quiet -- check /tmp/genix-semantic-project 2>&1)
+          status=$?
+          set -e
+
+          test $status -ne 0
+          echo "$output"
+          echo "$output" | grep 'error\[E0201\]'
+          echo "$output" | grep '/tmp/genix-semantic-project/src/math.gb:2:'
+          echo "$output" | grep '::: /tmp/genix-semantic-project/src/main.gb:4:'
+          echo "$output" | grep 'module referenced here'
+
+      - name: Verify semantic checker unit contract
+        run: cargo test typechecker::tests::checker_owns_semantic
