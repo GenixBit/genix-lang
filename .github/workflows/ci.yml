@@ -82,6 +82,46 @@ jobs:
           echo "$lexer_output" | grep '/tmp/genix-lexer-error.gb:1:'
           echo "$lexer_output" | grep '\^'
 
+      - name: Verify gb test runner
+        run: |
+          rm -rf /tmp/genix-test-app
+          cargo run --quiet -- new /tmp/genix-test-app
+          test_output=$(cargo run --quiet -- test /tmp/genix-test-app)
+          echo "$test_output"
+          echo "$test_output" | grep 'Genix Test Runner'
+          echo "$test_output" | grep '✓ arithmetic works'
+          echo "$test_output" | grep '1 passed'
+          echo "$test_output" | grep '0 failed'
+
+          cat > /tmp/genix-standalone-test.gb <<'GB'
+          fn double(value: int) -> int {
+              return value * 2;
+          }
+
+          test "standalone helpers work" {
+              assert(double(4) == 8);
+              pass();
+          }
+          GB
+          standalone_output=$(cargo run --quiet -- test /tmp/genix-standalone-test.gb)
+          echo "$standalone_output"
+          echo "$standalone_output" | grep '✓ standalone helpers work'
+
+          cat > /tmp/genix-failing-test.gb <<'GB'
+          test "failure is reported" {
+              assert(2 + 2 == 5);
+          }
+          GB
+          set +e
+          failure_output=$(cargo run --quiet -- test /tmp/genix-failing-test.gb 2>&1)
+          failure_status=$?
+          set -e
+          test $failure_status -ne 0
+          echo "$failure_output"
+          echo "$failure_output" | grep '✗ failure is reported'
+          echo "$failure_output" | grep 'assertion failed'
+          echo "$failure_output" | grep '1 failed'
+
       - name: Test runtime independently
         run: make -C genix-runtime test
 
@@ -218,6 +258,7 @@ jobs:
         run: |
           cargo run -- new /tmp/genix-ci-app
           cargo run -- check /tmp/genix-ci-app
+          cargo run -- test /tmp/genix-ci-app
           cargo run -- ir /tmp/genix-ci-app
           cargo run -- run /tmp/genix-ci-app
           cargo run -- build /tmp/genix-ci-app
