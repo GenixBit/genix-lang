@@ -36,6 +36,13 @@ impl Span {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedLocation {
+    pub source_name: String,
+    pub span: Span,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
@@ -43,6 +50,7 @@ pub struct Diagnostic {
     pub help: Option<String>,
     pub source_name: Option<String>,
     pub span: Option<Span>,
+    pub related: Vec<RelatedLocation>,
 }
 
 impl Diagnostic {
@@ -54,6 +62,7 @@ impl Diagnostic {
             help: None,
             source_name: None,
             span: None,
+            related: Vec::new(),
         }
     }
 
@@ -88,35 +97,37 @@ impl Diagnostic {
         self
     }
 
+    pub fn with_related(
+        mut self,
+        source_name: impl Into<String>,
+        span: Span,
+        label: impl Into<String>,
+    ) -> Self {
+        self.related.push(RelatedLocation {
+            source_name: source_name.into(),
+            span,
+            label: label.into(),
+        });
+        self
+    }
+
     pub fn render(&self, source: Option<&str>) -> String {
         let mut out = format!("error[{}]: {}\n", self.code, self.message);
 
         if let (Some(name), Some(span)) = (&self.source_name, self.span) {
             out.push_str(&format!(" --> {}:{}:{}\n", name, span.line, span.column));
-
             if let Some(source) = source {
-                if let Some(line_text) = source.lines().nth(span.line.saturating_sub(1)) {
-                    let line_no = span.line.to_string();
-                    let gutter = " ".repeat(line_no.len());
-                    let start = span.column.saturating_sub(1);
-                    let width = if span.end_line == span.line {
-                        span.end_column.saturating_sub(span.column) + 1
-                    } else {
-                        line_text.chars().count().saturating_sub(start).max(1)
-                    };
-                    out.push_str(&format!(" {gutter} |\n"));
-                    out.push_str(&format!(" {line_no} | {line_text}\n"));
-                    out.push_str(&format!(
-                        " {gutter} | {}{}",
-                        " ".repeat(start),
-                        "^".repeat(width.max(1))
-                    ));
-                    if let Some(label) = &self.label {
-                        out.push(' ');
-                        out.push_str(label);
-                    }
-                    out.push('\n');
-                }
+                render_excerpt(&mut out, source, span, self.label.as_deref(), '^');
+            }
+        }
+
+        for related in &self.related {
+            out.push_str(&format!(
+                " ::: {}:{}:{}\n",
+                related.source_name, related.span.line, related.span.column
+            ));
+            if let Ok(source) = fs::read_to_string(&related.source_name) {
+                render_excerpt(&mut out, &source, related.span, Some(&related.label), '-');
             }
         }
 
@@ -136,10 +147,54 @@ impl Diagnostic {
     }
 }
 
+fn render_excerpt(
+    out: &mut String,
+    source: &str,
+    span: Span,
+    label: Option<&str>,
+    marker: char,
+) {
+    if let Some(line_text) = source.lines().nth(span.line.saturating_sub(1)) {
+        let line_no = span.line.to_string();
+        let gutter = " ".repeat(line_no.len());
+        let start = span.column.saturating_sub(1);
+        let width = if span.end_line == span.line {
+            span.end_column.saturating_sub(span.column) + 1
+        } else {
+            line_text.chars().count().saturating_sub(start).max(1)
+        };
+        out.push_str(&format!(" {gutter} |\n"));
+        out.push_str(&format!(" {line_no} | {line_text}\n"));
+        out.push_str(&format!(
+            " {gutter} | {}{}",
+            " ".repeat(start),
+            marker.to_string().repeat(width.max(1))
+        ));
+        if let Some(label) = label {
+            out.push(' ');
+            out.push_str(label);
+        }
+        out.push('\n');
+    }
+}
+
+pub fn split_type_error(message: &str) -> (Option<String>, String) {
+    let raw = message.strip_prefix("type error: ").unwrap_or(message);
+    let prefix = "type error in function '";
+    if let Some(rest) = message.strip_prefix(prefix) {
+        if let Some(end) = rest.find("': ") {
+            let function = rest[..end].to_string();
+            let clean = rest[end + 3..].to_string();
+            return (Some(function), clean);
+        }
+    }
+    (None, raw.to_string())
+}
+
 pub fn type_diagnostic(message: &str, source_name: &str, source: &str) -> Diagnostic {
-    let clean = message.strip_prefix("type error: ").unwrap_or(message);
-    let code = classify_type_error(clean);
-    let mut diagnostic = Diagnostic::type_error(code, clean.to_string())
+    let (_, clean) = split_type_error(message);
+    let code = classify_type_error(&clean);
+    let mut diagnostic = Diagnostic::type_error(code, clean.clone())
         .with_source_name(source_name.to_string());
 
     match code {
@@ -189,7 +244,7 @@ pub fn type_diagnostic(message: &str, source_name: &str, source: &str) -> Diagno
         _ => {}
     }
 
-    if let Some(span) = locate_type_error(clean, source) {
+    if let Some(span) = locate_type_error(&clean, source) {
         diagnostic.span = Some(span);
     }
     diagnostic
@@ -259,9 +314,13 @@ fn locate_type_error(message: &str, source: &str) -> Option<Span> {
     }
 
     if let Some(name) = quoted_after(message, "function '") {
-        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| line.contains(&format!("{name}("))) {
-            let column = line.find(&name).unwrap_or(0) + 1;
-            return Some(Span::single(index + 1, column, name.chars().count()));
+        let local = name.rsplit('.').next().unwrap_or(&name);
+        if let Some((index, line)) = lines.iter().enumerate().find(|(_, line)| {
+            line.contains(&format!("{name}(")) || line.contains(&format!("{local}("))
+        }) {
+            let needle = if line.contains(&name) { &name } else { local };
+            let column = line.find(needle).unwrap_or(0) + 1;
+            return Some(Span::single(index + 1, column, needle.chars().count()));
         }
     }
 
@@ -349,12 +408,22 @@ mod tests {
     fn maps_type_mismatch_to_initializer_value() {
         let source = "fn main() {\n    let age: int = \"twenty\";\n}\n";
         let diagnostic = type_diagnostic(
-            "type error: initializer for 'age' expected int, found string",
+            "type error in function 'main': initializer for 'age' expected int, found string",
             "src/main.gb",
             source,
         );
         assert_eq!(diagnostic.code, "E0201");
+        assert_eq!(diagnostic.message, "initializer for 'age' expected int, found string");
         assert_eq!(diagnostic.span.unwrap().line, 2);
         assert!(diagnostic.span.unwrap().column > 10);
+    }
+
+    #[test]
+    fn splits_function_context_from_type_error() {
+        let (function, message) = split_type_error(
+            "type error in function 'math.add': initializer for 'x' expected int, found string",
+        );
+        assert_eq!(function.as_deref(), Some("math.add"));
+        assert!(message.starts_with("initializer for 'x'"));
     }
 }
