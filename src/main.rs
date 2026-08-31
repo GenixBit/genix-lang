@@ -6,6 +6,7 @@ mod ir;
 mod lexer;
 mod parser;
 mod project;
+mod testing;
 mod typechecker;
 
 use std::path::Path;
@@ -25,6 +26,7 @@ fn main() {
         }
         Some("run") => run_target(args.next().as_deref()),
         Some("check") => check_target(args.next().as_deref()),
+        Some("test") => test_target(args.next().as_deref()),
         Some("ir") => ir_target(args.next().as_deref()),
         Some("build") => build_target(args.collect()),
         Some("version") | Some("--version") | Some("-V") => {
@@ -57,13 +59,24 @@ fn main() {
 
 fn create_project(path: &str) -> Result<(), String> {
     let config = project::create_project(Path::new(path))?;
+    let tests_dir = Path::new(path).join("tests");
+    fs::create_dir_all(&tests_dir)
+        .map_err(|error| format!("could not create tests directory: {error}"))?;
+    fs::write(
+        tests_dir.join("smoke.gb"),
+        "test \"arithmetic works\" {\n    assert(2 + 2 == 4);\n}\n",
+    )
+    .map_err(|error| format!("could not write tests/smoke.gb: {error}"))?;
+
     println!("✓ created Genix project '{}'", config.name);
     println!("  {path}/genix.toml");
     println!("  {path}/src/main.gb");
+    println!("  {path}/tests/smoke.gb");
     println!();
     println!("Next:");
     println!("  cd {path}");
     println!("  gb run");
+    println!("  gb test");
     Ok(())
 }
 
@@ -93,6 +106,10 @@ fn check_target(target: Option<&str>) -> Result<(), String> {
         loaded.config.name
     );
     Ok(())
+}
+
+fn test_target(target: Option<&str>) -> Result<(), String> {
+    testing::run(Path::new(target.unwrap_or(".")))
 }
 
 fn ir_target(target: Option<&str>) -> Result<(), String> {
@@ -196,10 +213,16 @@ fn print_help() {
     println!("  gb new <name>                  Create a new Genix project");
     println!("  gb run [target]                Run a .gb file or project");
     println!("  gb check [target]              Check a .gb file or project");
+    println!("  gb test [target]               Run tests/*.gb or a standalone test file");
     println!("  gb ir [target]                 Print typed Genix intermediate representation");
     println!("  gb build [project] [--release] Build a native executable from Genix IR");
     println!("  gb version                     Show the current version");
     println!("  gb help                        Show this help");
+    println!();
+    println!("Test syntax:");
+    println!("  test \"addition works\" {{");
+    println!("      assert(2 + 2 == 4);");
+    println!("  }}");
     println!();
     println!("Native build requirements:");
     println!("  cc, clang, or gcc on PATH (or set CC)");
@@ -212,4 +235,5 @@ fn print_help() {
     println!("Project layout:");
     println!("  genix.toml");
     println!("  src/main.gb");
+    println!("  tests/*.gb");
 }
