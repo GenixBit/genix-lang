@@ -1,0 +1,71 @@
+name: Genix Formatter CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  formatter:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout compiler
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run formatter unit tests
+        run: cargo test formatter::
+
+      - name: Verify project formatting workflow
+        run: |
+          rm -rf /tmp/genix-fmt-app
+          cargo run --quiet -- new /tmp/genix-fmt-app
+
+          cat > /tmp/genix-fmt-app/src/main.gb <<'GB'
+          fn double(value:int)->int{// helper comment
+          return value*2;
+          }
+          fn main(){let result:int=double(4);print(result);// trailing comment
+          }
+          GB
+
+          cat > /tmp/genix-fmt-app/tests/smoke.gb <<'GB'
+          test "formatter keeps tests valid"{assert(2+2==4);// test comment
+          pass();}
+          GB
+
+          set +e
+          check_output=$(cargo run --quiet -- fmt /tmp/genix-fmt-app --check 2>&1)
+          check_status=$?
+          set -e
+          test $check_status -ne 0
+          echo "$check_output" | grep 'need formatting'
+
+          cargo run --quiet -- fmt /tmp/genix-fmt-app
+
+          grep 'fn double(value: int) -> int {' /tmp/genix-fmt-app/src/main.gb
+          grep '    // helper comment' /tmp/genix-fmt-app/src/main.gb
+          grep 'print(result); // trailing comment' /tmp/genix-fmt-app/src/main.gb
+          grep 'test "formatter keeps tests valid" {' /tmp/genix-fmt-app/tests/smoke.gb
+          grep 'assert(2 + 2 == 4); // test comment' /tmp/genix-fmt-app/tests/smoke.gb
+
+          cargo run --quiet -- fmt /tmp/genix-fmt-app --check
+          cargo run --quiet -- check /tmp/genix-fmt-app
+          cargo run --quiet -- test /tmp/genix-fmt-app
+
+      - name: Verify standalone formatting and idempotence
+        run: |
+          cat > /tmp/genix-format-single.gb <<'GB'
+          fn main(){let result:Result<string,string>=Ok("a   b");match result{Ok(value)=>{print(value);}Err(error)=>{print(error);}}}
+          GB
+
+          cargo run --quiet -- fmt /tmp/genix-format-single.gb
+          cp /tmp/genix-format-single.gb /tmp/genix-format-single.once.gb
+          cargo run --quiet -- fmt /tmp/genix-format-single.gb
+          cmp /tmp/genix-format-single.gb /tmp/genix-format-single.once.gb
+          grep 'Result<string,string>' /tmp/genix-format-single.gb
+          cargo run --quiet -- check /tmp/genix-format-single.gb
