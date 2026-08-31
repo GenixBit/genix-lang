@@ -3,7 +3,9 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::ast::{Expr, Program, Stmt};
+use crate::ast::{Expr, Program, Stmt, Type};
+use crate::diagnostics;
+use crate::source_map::SourceMap;
 use crate::{lexer, parser, typechecker};
 
 const GENIX_LANGUAGE_VERSION: &str = "0.0.1";
@@ -21,6 +23,7 @@ pub struct LoadedProject {
     pub config: ProjectConfig,
     pub program: Program,
     pub imports: Vec<String>,
+    pub source_map: SourceMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,11 +74,18 @@ pub fn load_project(target: &Path) -> Result<LoadedProject, String> {
     validate_entry_path(&config.entry)?;
 
     let entry_path = root.join(&config.entry);
+    let entry_name = entry_path.to_string_lossy().to_string();
     let entry_source = fs::read_to_string(&entry_path)
         .map_err(|error| format!("could not read project entry {}: {error}", entry_path.display()))?;
     let (imports, stripped_entry) = extract_imports(&entry_source)?;
-    let mut program = parse_source(&stripped_entry)
-        .map_err(|error| format!("{}: {error}", entry_path.display()))?;
+    let mut program = parse_source(&entry_name, &stripped_entry, &entry_source)?;
+
+    let mut source_map = SourceMap::new();
+    source_map.add_file(entry_name.clone(), entry_source.clone());
+    source_map.set_entry(entry_name.clone());
+    for function in &program.functions {
+        source_map.bind_function(function.name.clone(), entry_name.clone());
+    }
 
     let source_dir = entry_path.parent().unwrap_or(&root);
     let mut seen = HashSet::new();
@@ -87,6 +97,7 @@ pub fn load_project(target: &Path) -> Result<LoadedProject, String> {
         }
         validate_module_name(module)?;
         let module_path = resolve_module_path(&root, source_dir, module)?;
+        let module_name = module_path.to_string_lossy().to_string();
         let module_source = fs::read_to_string(&module_path)
             .map_err(|error| format!("could not read module {}: {error}", module_path.display()))?;
         let (nested_imports, stripped_module) = extract_imports(&module_source)?;
@@ -96,17 +107,30 @@ pub fn load_project(target: &Path) -> Result<LoadedProject, String> {
                 module
             ));
         }
-        let mut module_program = parse_source(&stripped_module)
-            .map_err(|error| format!("{}: {error}", module_path.display()))?;
+        let mut module_program = parse_source(&module_name, &stripped_module, &module_source)?;
         namespace_module(module, &mut module_program)?;
+
+        source_map.add_file(module_name.clone(), module_source);
+        source_map.bind_module(module.clone(), module_name.clone());
+        for function in &module_program.functions {
+            source_map.bind_function(function.name.clone(), module_name.clone());
+        }
         module_functions.extend(module_program.functions);
     }
 
     module_functions.extend(program.functions);
     program.functions = module_functions;
-    typechecker::check(&program)?;
+    if let Err(error) = typechecker::check(&program) {
+        return Err(render_project_type_error(&program, &source_map, &error));
+    }
 
-    Ok(LoadedProject { root, config, program, imports })
+    Ok(LoadedProject {
+        root,
+        config,
+        program,
+        imports,
+        source_map,
+    })
 }
 
 pub fn write_frontend_artifact(project: &LoadedProject) -> Result<PathBuf, String> {
@@ -117,16 +141,116 @@ pub fn write_frontend_artifact(project: &LoadedProject) -> Result<PathBuf, Strin
     let mut function_names: Vec<&str> = project.program.functions.iter().map(|f| f.name.as_str()).collect();
     function_names.sort_unstable();
     let artifact = format!(
-        "Genix frontend artifact\nproject={}\nversion={}\nentry={}\nmodules={}\nfunctions={}\ntypecheck=passed\n",
+        "Genix frontend artifact\nproject={}\nversion={}\nentry={}\nmodules={}\nsources={}\nfunctions={}\ntypecheck=passed\n",
         project.config.name,
         project.config.version,
         project.config.entry,
         project.imports.join(","),
+        project.source_map.len(),
         function_names.join(",")
     );
     fs::write(&artifact_path, artifact)
         .map_err(|error| format!("could not write frontend build artifact: {error}"))?;
     Ok(artifact_path)
+}
+
+fn render_project_type_error(program: &Program, source_map: &SourceMap, error: &str) -> String {
+    let (context_function, clean) = diagnostics::split_type_error(error);
+    let primary_function = context_function
+        .or_else(|| infer_error_function(program, error))
+        .or_else(|| referenced_function(&clean));
+
+    let primary_file = primary_function
+        .as_deref()
+        .and_then(|function| source_map.file_for_function(function))
+        .or_else(|| source_map.entry());
+
+    let Some(primary_file) = primary_file else {
+        return error.to_string();
+    };
+
+    let mut diagnostic = diagnostics::type_diagnostic(
+        &clean,
+        &primary_file.name,
+        &primary_file.source,
+    );
+
+    if let Some(function) = primary_function.as_deref() {
+        if let Some((module, _)) = function.split_once('.') {
+            if let Some((file, span)) = source_map.locate_module_reference(module) {
+                if file != primary_file.name {
+                    diagnostic = diagnostic.with_related(file, span, "module referenced here");
+                }
+            }
+        }
+    }
+
+    if let Some(callee) = referenced_function(&clean) {
+        if callee.contains('.') {
+            if let Some((file, span)) = source_map.locate_function(&callee) {
+                if file != primary_file.name {
+                    diagnostic = diagnostic.with_related(file, span, "function defined here");
+                }
+            }
+        }
+    }
+
+    diagnostic.render(Some(&primary_file.source))
+}
+
+fn infer_error_function(program: &Program, original_error: &str) -> Option<String> {
+    let (_, original_clean) = diagnostics::split_type_error(original_error);
+    if original_clean.contains("defined more than once")
+        || original_clean.contains("fn main")
+        || original_clean.contains("must define fn main")
+    {
+        return referenced_function(&original_clean);
+    }
+
+    for target_index in 0..program.functions.len() {
+        let mut probe = program.clone();
+        for (index, function) in probe.functions.iter_mut().enumerate() {
+            if index != target_index {
+                function.body = stub_body(function.return_type);
+            }
+        }
+        if let Err(candidate) = typechecker::check(&probe) {
+            let (_, candidate_clean) = diagnostics::split_type_error(&candidate);
+            if candidate_clean == original_clean {
+                return Some(program.functions[target_index].name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn stub_body(return_type: Type) -> Vec<Stmt> {
+    if return_type == Type::Void {
+        return Vec::new();
+    }
+    vec![Stmt::Return(Some(default_value(return_type)))]
+}
+
+fn default_value(ty: Type) -> Expr {
+    match ty {
+        Type::Int => Expr::Integer(0),
+        Type::Float => Expr::Float(0.0),
+        Type::Bool => Expr::Bool(false),
+        Type::String => Expr::String(String::new()),
+        Type::OptionInt | Type::OptionFloat | Type::OptionBool | Type::OptionString => Expr::None,
+        Type::ResultInt | Type::ResultFloat | Type::ResultBool | Type::ResultString => {
+            Expr::Err(Box::new(Expr::String(String::new())))
+        }
+        Type::Void => unreachable!("void functions do not need return stubs"),
+    }
+}
+
+fn referenced_function(message: &str) -> Option<String> {
+    let prefix = "function '";
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
 }
 
 fn resolve_module_path(project_root: &Path, source_dir: &Path, module: &str) -> Result<PathBuf, String> {
@@ -320,8 +444,14 @@ fn extract_imports(source: &str) -> Result<(Vec<String>, String), String> {
     Ok((imports, stripped))
 }
 
-fn parse_source(source: &str) -> Result<Program, String> {
-    parser::parse(lexer::lex(source)?)
+fn parse_source(source_name: &str, source: &str, display_source: &str) -> Result<Program, String> {
+    let tokens = lexer::lex_diagnostic(source).map_err(|diagnostic| {
+        diagnostic
+            .with_source_name(source_name.to_string())
+            .render(Some(display_source))
+    })?;
+    parser::parse_named(tokens, source_name)
+        .map_err(|diagnostic| diagnostic.render(Some(display_source)))
 }
 
 fn namespace_module(module: &str, program: &mut Program) -> Result<(), String> {
@@ -391,8 +521,40 @@ mod tests {
 
     #[test]
     fn namespaces_internal_module_calls_inside_wrappers() {
-        let mut program = parse_source("fn load() -> Result<string,string> { return Ok(\"x\"); } fn wrap() -> Result<string,string> { let x: string = load()?; return Ok(x); }").unwrap();
+        let mut program = parse_source(
+            "demo.gb",
+            "fn load() -> Result<string,string> { return Ok(\"x\"); } fn wrap() -> Result<string,string> { let x: string = load()?; return Ok(x); }",
+            "fn load() -> Result<string,string> { return Ok(\"x\"); } fn wrap() -> Result<string,string> { let x: string = load()?; return Ok(x); }",
+        ).unwrap();
         namespace_module("demo", &mut program).unwrap();
         assert_eq!(program.functions[0].name, "demo.load");
+    }
+
+    #[test]
+    fn reports_imported_module_semantic_errors_with_related_entry_location() {
+        let root = env::temp_dir().join(format!("genix-source-map-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("genix.toml"),
+            "[project]\nname = \"source-map-test\"\nentry = \"src/main.gb\"\n",
+        ).unwrap();
+        fs::write(
+            root.join("src/main.gb"),
+            "import math;\n\nfn main() {\n    print(math.bad());\n}\n",
+        ).unwrap();
+        fs::write(
+            root.join("src/math.gb"),
+            "fn bad() -> int {\n    let value: int = \"wrong\";\n    return value;\n}\n",
+        ).unwrap();
+
+        let error = load_project(&root).err().expect("project should fail type checking");
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(error.contains("error[E0201]"));
+        assert!(error.contains("src/math.gb:2:"));
+        assert!(error.contains(":::"));
+        assert!(error.contains("src/main.gb:4:"));
+        assert!(error.contains("module referenced here"));
     }
 }
