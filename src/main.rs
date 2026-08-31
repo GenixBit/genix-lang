@@ -7,6 +7,7 @@ mod ir;
 mod lexer;
 mod parser;
 mod project;
+mod source_map;
 mod testing;
 mod typechecker;
 
