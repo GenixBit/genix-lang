@@ -357,6 +357,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
     let mut tokens = Vec::new();
     let mut i = 0usize;
     let mut pending_newline = false;
+    let mut lexical_generic_depth = 0usize;
 
     while i < chars.len() {
         let ch = chars[i];
@@ -427,6 +428,25 @@ fn tokenize(source: &str) -> Result<Vec<Token>, String> {
                 i += 1;
             }
             tokens.push(Token::Number(chars[start..i].iter().collect()));
+            pending_newline = false;
+            continue;
+        }
+
+        let opens_generic = ch == '<'
+            && (lexical_generic_depth > 0
+                || matches!(tokens.last(), Some(Token::Word(word)) if matches!(word.as_str(), "Option" | "Result")));
+        if opens_generic {
+            tokens.push(Token::Symbol("<".to_string()));
+            lexical_generic_depth += 1;
+            i += 1;
+            pending_newline = false;
+            continue;
+        }
+
+        if ch == '>' && lexical_generic_depth > 0 {
+            tokens.push(Token::Symbol(">".to_string()));
+            lexical_generic_depth -= 1;
+            i += 1;
             pending_newline = false;
             continue;
         }
