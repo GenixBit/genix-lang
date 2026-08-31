@@ -3,8 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::ast::{Expr, Program, Stmt, Type};
-use crate::diagnostics;
+use crate::ast::{Expr, Program, Stmt};
 use crate::source_map::SourceMap;
 use crate::{lexer, parser, typechecker};
 
@@ -120,8 +119,13 @@ pub fn load_project(target: &Path) -> Result<LoadedProject, String> {
 
     module_functions.extend(program.functions);
     program.functions = module_functions;
-    if let Err(error) = typechecker::check(&program) {
-        return Err(render_project_type_error(&program, &source_map, &error));
+    if let Err(diagnostic) = typechecker::check_diagnostic(&program, &source_map) {
+        let source = diagnostic
+            .source_name
+            .as_deref()
+            .and_then(|name| source_map.file(name))
+            .map(|file| file.source.as_str());
+        return Err(diagnostic.render(source));
     }
 
     Ok(LoadedProject {
@@ -138,7 +142,12 @@ pub fn write_frontend_artifact(project: &LoadedProject) -> Result<PathBuf, Strin
     fs::create_dir_all(&build_dir)
         .map_err(|error| format!("could not create build directory: {error}"))?;
     let artifact_path = build_dir.join("genix.frontend");
-    let mut function_names: Vec<&str> = project.program.functions.iter().map(|f| f.name.as_str()).collect();
+    let mut function_names: Vec<&str> = project
+        .program
+        .functions
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect();
     function_names.sort_unstable();
     let artifact = format!(
         "Genix frontend artifact\nproject={}\nversion={}\nentry={}\nmodules={}\nsources={}\nfunctions={}\ntypecheck=passed\n",
@@ -154,106 +163,11 @@ pub fn write_frontend_artifact(project: &LoadedProject) -> Result<PathBuf, Strin
     Ok(artifact_path)
 }
 
-fn render_project_type_error(program: &Program, source_map: &SourceMap, error: &str) -> String {
-    let (context_function, clean) = diagnostics::split_type_error(error);
-    let primary_function = context_function
-        .or_else(|| infer_error_function(program, error))
-        .or_else(|| referenced_function(&clean));
-
-    let primary_file = primary_function
-        .as_deref()
-        .and_then(|function| source_map.file_for_function(function))
-        .or_else(|| source_map.entry());
-
-    let Some(primary_file) = primary_file else {
-        return error.to_string();
-    };
-
-    let mut diagnostic = diagnostics::type_diagnostic(
-        &clean,
-        &primary_file.name,
-        &primary_file.source,
-    );
-
-    if let Some(function) = primary_function.as_deref() {
-        if let Some((module, _)) = function.split_once('.') {
-            if let Some((file, span)) = source_map.locate_module_reference(module) {
-                if file != primary_file.name {
-                    diagnostic = diagnostic.with_related(file, span, "module referenced here");
-                }
-            }
-        }
-    }
-
-    if let Some(callee) = referenced_function(&clean) {
-        if callee.contains('.') {
-            if let Some((file, span)) = source_map.locate_function(&callee) {
-                if file != primary_file.name {
-                    diagnostic = diagnostic.with_related(file, span, "function defined here");
-                }
-            }
-        }
-    }
-
-    diagnostic.render(Some(&primary_file.source))
-}
-
-fn infer_error_function(program: &Program, original_error: &str) -> Option<String> {
-    let (_, original_clean) = diagnostics::split_type_error(original_error);
-    if original_clean.contains("defined more than once")
-        || original_clean.contains("fn main")
-        || original_clean.contains("must define fn main")
-    {
-        return referenced_function(&original_clean);
-    }
-
-    for target_index in 0..program.functions.len() {
-        let mut probe = program.clone();
-        for (index, function) in probe.functions.iter_mut().enumerate() {
-            if index != target_index {
-                function.body = stub_body(function.return_type);
-            }
-        }
-        if let Err(candidate) = typechecker::check(&probe) {
-            let (_, candidate_clean) = diagnostics::split_type_error(&candidate);
-            if candidate_clean == original_clean {
-                return Some(program.functions[target_index].name.clone());
-            }
-        }
-    }
-    None
-}
-
-fn stub_body(return_type: Type) -> Vec<Stmt> {
-    if return_type == Type::Void {
-        return Vec::new();
-    }
-    vec![Stmt::Return(Some(default_value(return_type)))]
-}
-
-fn default_value(ty: Type) -> Expr {
-    match ty {
-        Type::Int => Expr::Integer(0),
-        Type::Float => Expr::Float(0.0),
-        Type::Bool => Expr::Bool(false),
-        Type::String => Expr::String(String::new()),
-        Type::OptionInt | Type::OptionFloat | Type::OptionBool | Type::OptionString => Expr::None,
-        Type::ResultInt | Type::ResultFloat | Type::ResultBool | Type::ResultString => {
-            Expr::Err(Box::new(Expr::String(String::new())))
-        }
-        Type::Void => unreachable!("void functions do not need return stubs"),
-    }
-}
-
-fn referenced_function(message: &str) -> Option<String> {
-    let prefix = "function '";
-    let start = message.find(prefix)? + prefix.len();
-    let rest = &message[start..];
-    let end = rest.find('\'')?;
-    Some(rest[..end].to_string())
-}
-
-fn resolve_module_path(project_root: &Path, source_dir: &Path, module: &str) -> Result<PathBuf, String> {
+fn resolve_module_path(
+    project_root: &Path,
+    source_dir: &Path,
+    module: &str,
+) -> Result<PathBuf, String> {
     let local = source_dir.join(format!("{module}.gb"));
     if local.is_file() {
         return Ok(local);
@@ -266,7 +180,8 @@ fn resolve_module_path(project_root: &Path, source_dir: &Path, module: &str) -> 
     }
     Err(format!(
         "module '{module}' was not found in '{}' or Genix stdlib '{}'",
-        source_dir.display(), stdlib_root.display()
+        source_dir.display(),
+        stdlib_root.display()
     ))
 }
 
@@ -301,13 +216,17 @@ fn validate_stdlib_compatibility(root: &Path) -> Result<(), String> {
     if compatibility.language_version != GENIX_LANGUAGE_VERSION {
         return Err(format!(
             "Genix stdlib {} requires language {}, but compiler language version is {}",
-            compatibility.stdlib_version, compatibility.language_version, GENIX_LANGUAGE_VERSION
+            compatibility.stdlib_version,
+            compatibility.language_version,
+            GENIX_LANGUAGE_VERSION
         ));
     }
     if compatibility.runtime_abi != GENIX_RUNTIME_ABI {
         return Err(format!(
             "Genix stdlib {} requires runtime ABI {}, but compiler expects ABI {}",
-            compatibility.stdlib_version, compatibility.runtime_abi, GENIX_RUNTIME_ABI
+            compatibility.stdlib_version,
+            compatibility.runtime_abi,
+            GENIX_RUNTIME_ABI
         ));
     }
     Ok(())
@@ -319,7 +238,9 @@ fn parse_stdlib_compatibility(source: &str) -> Result<StdlibCompatibility, Strin
     let mut runtime_abi = None;
     for raw_line in source.lines() {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         let Some((key, value)) = line.split_once('=') else {
             return Err(format!("invalid stdlib COMPATIBILITY line '{line}'"));
         };
@@ -331,14 +252,17 @@ fn parse_stdlib_compatibility(source: &str) -> Result<StdlibCompatibility, Strin
         }
     }
     Ok(StdlibCompatibility {
-        stdlib_version: stdlib_version.ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_STDLIB_VERSION".to_string())?,
-        language_version: language_version.ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_LANGUAGE_VERSION".to_string())?,
-        runtime_abi: runtime_abi.ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_RUNTIME_ABI".to_string())?,
+        stdlib_version: stdlib_version
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_STDLIB_VERSION".to_string())?,
+        language_version: language_version
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_LANGUAGE_VERSION".to_string())?,
+        runtime_abi: runtime_abi
+            .ok_or_else(|| "stdlib COMPATIBILITY requires GENIX_RUNTIME_ABI".to_string())?,
     })
 }
 
 fn normalize_project_root(target: &Path) -> Result<PathBuf, String> {
-    let root = if target.file_name().and_then(|v| v.to_str()) == Some("genix.toml") {
+    let root = if target.file_name().and_then(|value| value.to_str()) == Some("genix.toml") {
         target.parent().unwrap_or_else(|| Path::new("."))
     } else {
         target
@@ -362,12 +286,16 @@ fn parse_manifest(source: &str) -> Result<ProjectConfig, String> {
     let mut entry = None;
     for (index, raw_line) in source.lines().enumerate() {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         if line.starts_with('[') && line.ends_with(']') {
             in_project = line == "[project]";
             continue;
         }
-        if !in_project { continue; }
+        if !in_project {
+            continue;
+        }
         let Some((key, raw_value)) = line.split_once('=') else {
             return Err(format!("invalid genix.toml line {}", index + 1));
         };
@@ -392,23 +320,33 @@ fn parse_manifest_string(value: &str, line: usize) -> Result<String, String> {
     if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
         Ok(value[1..value.len() - 1].to_string())
     } else {
-        Err(format!("genix.toml line {line}: values must be quoted strings"))
+        Err(format!(
+            "genix.toml line {line}: values must be quoted strings"
+        ))
     }
 }
 
 fn validate_entry_path(entry: &str) -> Result<(), String> {
     let path = Path::new(entry);
-    if path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) {
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
         return Err("genix.toml entry must stay inside the project directory".into());
     }
-    if path.extension().and_then(|v| v.to_str()) != Some("gb") {
+    if path.extension().and_then(|value| value.to_str()) != Some("gb") {
         return Err("genix.toml entry must point to a .gb source file".into());
     }
     Ok(())
 }
 
 fn validate_project_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         return Err("project name may contain only letters, numbers, '-' and '_'".into());
     }
     Ok(())
@@ -416,8 +354,12 @@ fn validate_project_name(name: &str) -> Result<(), String> {
 
 fn validate_module_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
-    let Some(first) = chars.next() else { return Err("import requires a module name".into()); };
-    if !(first.is_ascii_alphabetic() || first == '_') || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+    let Some(first) = chars.next() else {
+        return Err("import requires a module name".into());
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
         return Err(format!("invalid module name '{name}'"));
     }
     Ok(())
@@ -431,7 +373,10 @@ fn extract_imports(source: &str) -> Result<(Vec<String>, String), String> {
         if let Some(rest) = line.strip_prefix("import ") {
             let module = rest.trim_end_matches(';').trim();
             if module.is_empty() || (rest.trim() == module && !line.ends_with(';')) {
-                return Err(format!("invalid import at line {}: expected 'import module;'", index + 1));
+                return Err(format!(
+                    "invalid import at line {}: expected 'import module;'",
+                    index + 1
+                ));
             }
             validate_module_name(module)?;
             imports.push(module.to_string());
@@ -444,7 +389,11 @@ fn extract_imports(source: &str) -> Result<(Vec<String>, String), String> {
     Ok((imports, stripped))
 }
 
-fn parse_source(source_name: &str, source: &str, display_source: &str) -> Result<Program, String> {
+fn parse_source(
+    source_name: &str,
+    source: &str,
+    display_source: &str,
+) -> Result<Program, String> {
     let tokens = lexer::lex_diagnostic(source).map_err(|diagnostic| {
         diagnostic
             .with_source_name(source_name.to_string())
@@ -455,7 +404,11 @@ fn parse_source(source_name: &str, source: &str, display_source: &str) -> Result
 }
 
 fn namespace_module(module: &str, program: &mut Program) -> Result<(), String> {
-    if program.functions.iter().any(|function| function.name == "main") {
+    if program
+        .functions
+        .iter()
+        .any(|function| function.name == "main")
+    {
         return Err(format!("module '{module}' cannot define fn main()"));
     }
     let local_names: HashSet<String> = program.functions.iter().map(|f| f.name.clone()).collect();
@@ -469,15 +422,24 @@ fn namespace_module(module: &str, program: &mut Program) -> Result<(), String> {
 fn rewrite_statements(statements: &mut [Stmt], module: &str, local_names: &HashSet<String>) {
     for statement in statements {
         match statement {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::Print(value) | Stmt::Expr(value) => {
+            Stmt::Let { value, .. }
+            | Stmt::Assign { value, .. }
+            | Stmt::Print(value)
+            | Stmt::Expr(value) => {
                 rewrite_expr(value, module, local_names);
             }
             Stmt::Return(Some(value)) => rewrite_expr(value, module, local_names),
             Stmt::Return(None) => {}
-            Stmt::If { condition, then_branch, else_branch } => {
+            Stmt::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 rewrite_expr(condition, module, local_names);
                 rewrite_statements(then_branch, module, local_names);
-                if let Some(branch) = else_branch { rewrite_statements(branch, module, local_names); }
+                if let Some(branch) = else_branch {
+                    rewrite_statements(branch, module, local_names);
+                }
             }
             Stmt::While { condition, body } => {
                 rewrite_expr(condition, module, local_names);
@@ -485,7 +447,9 @@ fn rewrite_statements(statements: &mut [Stmt], module: &str, local_names: &HashS
             }
             Stmt::Match { value, arms } => {
                 rewrite_expr(value, module, local_names);
-                for arm in arms { rewrite_statements(&mut arm.body, module, local_names); }
+                for arm in arms {
+                    rewrite_statements(&mut arm.body, module, local_names);
+                }
             }
             Stmt::Block(body) => rewrite_statements(body, module, local_names),
         }
@@ -495,16 +459,28 @@ fn rewrite_statements(statements: &mut [Stmt], module: &str, local_names: &HashS
 fn rewrite_expr(expr: &mut Expr, module: &str, local_names: &HashSet<String>) {
     match expr {
         Expr::Call { callee, arguments } => {
-            if local_names.contains(callee) { *callee = format!("{module}.{callee}"); }
-            for argument in arguments { rewrite_expr(argument, module, local_names); }
+            if local_names.contains(callee) {
+                *callee = format!("{module}.{callee}");
+            }
+            for argument in arguments {
+                rewrite_expr(argument, module, local_names);
+            }
         }
-        Expr::Some(value) | Expr::Ok(value) | Expr::Err(value) | Expr::Try(value)
+        Expr::Some(value)
+        | Expr::Ok(value)
+        | Expr::Err(value)
+        | Expr::Try(value)
         | Expr::Unary { expr: value, .. } => rewrite_expr(value, module, local_names),
         Expr::Binary { left, right, .. } => {
             rewrite_expr(left, module, local_names);
             rewrite_expr(right, module, local_names);
         }
-        Expr::Integer(_) | Expr::Float(_) | Expr::Bool(_) | Expr::String(_) | Expr::Variable(_) | Expr::None => {}
+        Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::Bool(_)
+        | Expr::String(_)
+        | Expr::Variable(_)
+        | Expr::None => {}
     }
 }
 
@@ -514,7 +490,10 @@ mod tests {
 
     #[test]
     fn parses_project_manifest() {
-        let config = parse_manifest("[project]\nname = \"demo\"\nversion = \"1.2.3\"\nentry = \"src/main.gb\"\n").unwrap();
+        let config = parse_manifest(
+            "[project]\nname = \"demo\"\nversion = \"1.2.3\"\nentry = \"src/main.gb\"\n",
+        )
+        .unwrap();
         assert_eq!(config.name, "demo");
         assert_eq!(config.version, "1.2.3");
     }
@@ -525,30 +504,39 @@ mod tests {
             "demo.gb",
             "fn load() -> Result<string,string> { return Ok(\"x\"); } fn wrap() -> Result<string,string> { let x: string = load()?; return Ok(x); }",
             "fn load() -> Result<string,string> { return Ok(\"x\"); } fn wrap() -> Result<string,string> { let x: string = load()?; return Ok(x); }",
-        ).unwrap();
+        )
+        .unwrap();
         namespace_module("demo", &mut program).unwrap();
         assert_eq!(program.functions[0].name, "demo.load");
     }
 
     #[test]
     fn reports_imported_module_semantic_errors_with_related_entry_location() {
-        let root = env::temp_dir().join(format!("genix-source-map-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "genix-source-map-test-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(
             root.join("genix.toml"),
             "[project]\nname = \"source-map-test\"\nentry = \"src/main.gb\"\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             root.join("src/main.gb"),
             "import math;\n\nfn main() {\n    print(math.bad());\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(
             root.join("src/math.gb"),
             "fn bad() -> int {\n    let value: int = \"wrong\";\n    return value;\n}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
-        let error = load_project(&root).err().expect("project should fail type checking");
+        let error = load_project(&root)
+            .err()
+            .expect("project should fail type checking");
         let _ = fs::remove_dir_all(&root);
 
         assert!(error.contains("error[E0201]"));

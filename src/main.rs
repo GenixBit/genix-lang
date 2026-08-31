@@ -239,9 +239,16 @@ fn compile_frontend(source_name: &str, source: &str) -> Result<ast::Program, Str
     })?;
     let program = parser::parse_named(tokens, source_name)
         .map_err(|diagnostic| diagnostic.render(Some(source)))?;
-    typechecker::check(&program).map_err(|error| {
-        diagnostics::type_diagnostic(&error, source_name, source).render(Some(source))
-    })?;
+
+    let mut source_map = source_map::SourceMap::new();
+    source_map.add_file(source_name.to_string(), source.to_string());
+    source_map.set_entry(source_name.to_string());
+    for function in &program.functions {
+        source_map.bind_function(function.name.clone(), source_name.to_string());
+    }
+
+    typechecker::check_diagnostic(&program, &source_map)
+        .map_err(|diagnostic| diagnostic.render(Some(source)))?;
     Ok(program)
 }
 
